@@ -1,0 +1,37 @@
+---
+# Web Server installation tasks
+- name: Install Nginx
+  package:
+    name: nginx
+    state: present
+
+- name: Create web root
+  file:
+    path: /var/www/html/app
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+
+- name: Deploy index.html
+  copy:
+    content: "<h1>Hello from Ansible Piloteer!</h1><p>Deployed at {{ ansible_date_time.iso8601 }}</p>"
+    dest: /var/www/html/app/index.html
+
+- name: Configure Nginx VirtualHost
+  copy:
+    content: |
+      server {
+          listen 80;
+          server_name localhost;
+          root /var/www/html/app;
+          index index.html;
+      }
+    dest: /etc/nginx/sites-enabled/app.conf
+  notify: Restart Nginx
+
+- name: Ensure Nginx is running
+  service:
+    name: nginx
+    state: started
+    enabled: yes

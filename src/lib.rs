@@ -1,0 +1,13 @@
+pub mod ai;
+pub mod app;
+pub mod auth;
+pub mod clipboard;
+pub mod config;
+pub mod execution;
+pub mod highlight;
+pub mod ipc;
+pub mod quota;
+pub mod report;
+pub mod session;
+pub mod ui;
+pub mod widgets;

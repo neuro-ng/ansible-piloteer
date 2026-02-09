@@ -1,0 +1,25 @@
+---
+- name: Drift Demo
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Create a file (Changed)
+      copy:
+        content: "Initial content"
+        dest: "/tmp/drift_demo.txt"
+
+    - name: Verify file content (OK)
+      copy:
+        content: "Initial content"
+        dest: "/tmp/drift_demo.txt"
+
+    - name: Modify file content (Changed)
+      copy:
+        content: "Modified content"
+        dest: "/tmp/drift_demo.txt"
+
+    - name: Remove file (Changed)
+      file:
+        path: "/tmp/drift_demo.txt"
+        state: absent

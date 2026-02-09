@@ -1,0 +1,13 @@
+---
+- name: Hello World Piloteer
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Step 1
+      debug:
+        msg: "Hello from Step 1"
+
+    - name: Step 2
+      debug:
+        msg: "Hello from Step 2"

@@ -1,0 +1,23 @@
+---
+# Base installation tasks
+- name: Install basic packages
+  package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - curl
+    - git
+    - htop
+    - vim
+
+- name: Create admin user
+  user:
+    name: admin
+    shell: /bin/bash
+    groups: sudo
+    append: yes
+
+- name: Set up message of the day
+  copy:
+    content: "Welcome to the Complex Docker Test Container managed by Ansible Piloteer!"
+    dest: /etc/motd

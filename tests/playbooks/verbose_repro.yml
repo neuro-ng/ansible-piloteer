@@ -1,0 +1,7 @@
+---
+- name: Verbose Reproduction
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Run Echo
+      command: echo "Verbose Test"

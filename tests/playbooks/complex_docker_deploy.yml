@@ -1,0 +1,46 @@
+---
+- name: Provision Test Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Ensure Docker python library is not required (using shell)
+      debug:
+        msg: "Provisioning Docker container via shell to avoid dependency issues"
+
+    - name: Start Test Container
+      shell: |
+        docker run -d --name piloteer_test_container \
+          --privileged \
+          -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+          geerlingguy/docker-ubuntu2004-ansible:latest \
+          /lib/systemd/systemd
+      register: docker_run
+      changed_when: docker_run.stdout | length > 0
+      failed_when: 
+        - docker_run.rc != 0 
+        - "'Conflict' not in docker_run.stderr" # Ignore if already running
+
+    - name: Get Container IP
+      shell: docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' piloteer_test_container
+      register: container_ip
+
+    - name: Add Container to Inventory
+      add_host:
+        name: piloteer_test_container
+        ansible_host: "{{ container_ip.stdout }}"
+        ansible_connection: docker
+        ansible_user: root
+        groups: 
+          - test_servers
+
+- name: Configure Test Server
+  hosts: test_servers
+  gather_facts: true
+  vars:
+    # Set to true to test Piloteer's ability to fix/retry failures
+    simulate_db_failure: true 
+  roles:
+    - role: ../roles/base_install
+    - role: ../roles/web_server
+    - role: ../roles/db_server

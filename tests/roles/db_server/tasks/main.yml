@@ -1,0 +1,32 @@
+---
+# DB Server installation tasks
+- name: Install PostgreSQL
+  package:
+    name: postgresql
+    state: present
+
+- name: Initialize Database
+  command: pg_createcluster 13 main --start
+  args:
+    creates: /etc/postgresql/13/main
+
+- name: Create Application User
+  become: yes
+  become_user: postgres
+  postgresql_user:
+    name: app_user
+    password: secure_password
+  ignore_errors: yes # Module might not be present, fallback to shell
+  register: pg_user_result
+
+- name: Create Application User (Shell Fallback)
+  become: yes
+  become_user: postgres
+  shell: |
+    psql -c "CREATE USER app_user WITH PASSWORD 'secure_password';" || true
+  when: pg_user_result.failed | default(false)
+
+- name: Simulate Flaky Deployment Task
+  fail:
+    msg: "Database migration failed due to lock timeout!"
+  when: simulate_db_failure | default(false) | bool

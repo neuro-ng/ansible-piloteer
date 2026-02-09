@@ -1,0 +1,52 @@
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Ansible
+RUN pip install ansible
+
+# Setup directories
+WORKDIR /app
+
+# Copy distributable
+COPY dist/ /tmp/dist/
+
+# Run Install Script
+# Note: We can't interactively run tools/install.sh if it depends on $HOME correctly?
+# The script relies on HOME.
+RUN /tmp/dist/install.sh
+
+# Configure Ansible to use our plugin
+ENV ANSIBLE_STRATEGY_PLUGINS=/root/.ansible/plugins/strategy
+ENV ANSIBLE_STRATEGY=piloteer
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Copy Test Playbook
+COPY tools/test_playbook.yml /app/test_playbook.yml
+
+# We need to run the piloteer in HEADLESS mode for testing
+ENV PILOTEER_HEADLESS=1
+
+# Entrypoint: Run the playbook using the piloteer wrapped ansible
+# Actually, piloteer wraps ansible via the Strategy.
+# But normally we just run `ansible-playbook`.
+# Wait, how does our binary start?
+# Our binary `ansible-piloteer` is the IPC Server.
+# The Plugin is the Client.
+# We usually run `ansible-piloteer ansible-playbook ...`?
+# In README I said: `ansible-piloteer ansible-playbook playbook.yml`
+# No, wait. The architecture is:
+# Run `ansible-piloteer`. It starts server.
+# Run `ansible-playbook`. It connects to server.
+# But usually we run them together or separately.
+# For HEADLESS testing, we need to run them.
+# Let's create a runner script.
+
+COPY tools/run_tests.sh /app/run_tests.sh
+RUN chmod +x /app/run_tests.sh
+
+CMD ["/app/run_tests.sh"]

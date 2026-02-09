@@ -1,0 +1,18 @@
+---
+- name: Test Playbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Success Task
+      debug:
+        msg: "This is a passing task logic."
+
+    - name: Fail Task
+      fail:
+        msg: "This task is designed to fail unless fixed."
+      when: should_fail | default(true)
+
+    - name: Final Task
+      debug:
+        msg: "We made it past the failure!"

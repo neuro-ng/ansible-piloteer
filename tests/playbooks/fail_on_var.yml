@@ -1,0 +1,9 @@
+- hosts: localhost
+  gather_facts: no
+  vars:
+    should_fail: true
+  tasks:
+    - name: Conditional Fail
+      fail:
+        msg: "Failed because should_fail is true"
+      when: should_fail|bool
