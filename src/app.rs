@@ -21,6 +21,8 @@ pub enum Action {
     AnalysisNext,
     AnalysisPrev,
     Yank,
+    YankVisual,    // [NEW] Phase 16: Visual mode yank
+    YankWithCount, // [NEW] Phase 16: Count-based yank (y3j)
     SaveSession,
     ExportReport, // [NEW]
     None,
@@ -46,7 +48,6 @@ pub struct App {
     pub failed_task: Option<String>,
     pub failed_result: Option<serde_json::Value>,
     pub waiting_for_proceed: bool,
-    pub ipc_tx: Option<mpsc::Sender<Message>>,
     pub ai_client: Option<AiClient>,
     pub suggestion: Option<Analysis>,
     pub asking_ai: bool,
@@ -76,7 +77,15 @@ pub struct App {
     pub hosts: std::collections::HashMap<String, HostStatus>,
     pub host_list_index: usize,
     pub show_detail_view: bool,
+    // Communication
+    pub ipc_tx: Option<mpsc::Sender<Message>>,
+    pub client_connected: bool, // [NEW] Track active client connection
     pub unreachable_hosts: std::collections::HashSet<String>, // [NEW]
+    // Visual Mode State (Phase 16: Multi-Line Copy)
+    pub visual_mode: bool,
+    pub visual_start_index: Option<usize>,
+    pub pending_count: Option<usize>,
+    pub pending_command: Option<char>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -129,6 +138,7 @@ impl App {
             failed_result: None,
             waiting_for_proceed: false,
             ipc_tx: None,
+            client_connected: false, // [NEW]
             ai_client,
             suggestion: None,
             asking_ai: false,
@@ -157,11 +167,20 @@ impl App {
             host_list_index: 0,
             show_detail_view: false,
             unreachable_hosts: std::collections::HashSet::new(),
+            // Visual Mode State
+            visual_mode: false,
+            visual_start_index: None,
+            pending_count: None,
+            pending_command: None,
         }
     }
 
-    pub fn set_ipc_tx(&mut self, tx: mpsc::Sender<Message>) {
-        self.ipc_tx = Some(tx);
+    pub fn set_ipc_tx(&mut self, tx: Option<mpsc::Sender<Message>>) {
+        self.ipc_tx = tx;
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.client_connected && self.ipc_tx.is_some()
     }
 
     pub fn handle_event(&mut self, event: Event) -> Action {
@@ -322,7 +341,29 @@ impl App {
                             self.analysis_focus = AnalysisFocus::TaskList;
                             return Action::None;
                         }
-                        KeyCode::Char('y') => return Action::Yank,
+                        KeyCode::Char('y') => {
+                            // Check if we're in visual mode or have a pending count
+                            if self.visual_mode {
+                                return Action::YankVisual;
+                            } else if self.pending_count.is_some() {
+                                return Action::YankWithCount;
+                            } else {
+                                return Action::Yank;
+                            }
+                        }
+                        KeyCode::Char('v') => {
+                            // Toggle visual mode
+                            if self.visual_mode {
+                                self.visual_mode = false;
+                                self.visual_start_index = None;
+                            } else {
+                                self.visual_mode = true;
+                                if let Some(tree) = &self.analysis_tree {
+                                    self.visual_start_index = Some(tree.selected_line);
+                                }
+                            }
+                            return Action::None;
+                        }
                         KeyCode::Char('w') => {
                             if let Some(tree) = &mut self.analysis_tree {
                                 tree.text_wrap = !tree.text_wrap;
@@ -339,12 +380,43 @@ impl App {
                             AnalysisFocus::DataBrowser => {
                                 if let Some(tree) = &mut self.analysis_tree {
                                     match key.code {
-                                        KeyCode::Up | KeyCode::Char('k') => {
-                                            tree.select_prev();
+                                        // Number input for counts
+                                        KeyCode::Char(c @ '0'..='9') => {
+                                            let digit = c.to_digit(10).unwrap() as usize;
+                                            self.pending_count =
+                                                Some(self.pending_count.unwrap_or(0) * 10 + digit);
                                             return Action::None;
                                         }
-                                        KeyCode::Down | KeyCode::Char('j') => {
-                                            tree.select_next();
+                                        KeyCode::Up => {
+                                            let count = self.pending_count.unwrap_or(1);
+                                            self.pending_count = None;
+                                            for _ in 0..count {
+                                                tree.select_prev();
+                                            }
+                                            return Action::None;
+                                        }
+                                        KeyCode::Down => {
+                                            let count = self.pending_count.unwrap_or(1);
+                                            self.pending_count = None;
+                                            for _ in 0..count {
+                                                tree.select_next();
+                                            }
+                                            return Action::None;
+                                        }
+                                        KeyCode::Char('k') => {
+                                            let count = self.pending_count.unwrap_or(1);
+                                            self.pending_count = None;
+                                            for _ in 0..count {
+                                                tree.select_prev();
+                                            }
+                                            return Action::None;
+                                        }
+                                        KeyCode::Char('j') => {
+                                            let count = self.pending_count.unwrap_or(1);
+                                            self.pending_count = None;
+                                            for _ in 0..count {
+                                                tree.select_next();
+                                            }
                                             return Action::None;
                                         }
                                         KeyCode::Char('h') => {

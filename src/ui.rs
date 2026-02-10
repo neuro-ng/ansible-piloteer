@@ -34,6 +34,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(frame);
     }
+
+    // [NEW] Phase 3: Connection Alert
+    if !app.replay_mode && !app.is_connected() {
+        draw_connection_alert(frame);
+    }
 }
 
 fn draw_host_list(frame: &mut Frame, app: &mut App) {
@@ -501,88 +506,155 @@ fn draw_help(frame: &mut Frame) {
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(Color::Cyan);
+    let indent_style = Style::default().fg(Color::Gray);
 
     let rows = vec![
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Global").style(header_style),
             Cell::from(""),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("q / Esc").style(key_style),
             Cell::from("Quit / Close"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("?").style(key_style),
             Cell::from("Toggle Help"),
         ]),
-        Row::new(vec![Cell::from(""), Cell::from("")]),
+        Row::new(vec![Cell::from(""), Cell::from(""), Cell::from("")]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Dashboard").style(header_style),
             Cell::from(""),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("p").style(key_style),
             Cell::from("Proceed (Step)"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("c").style(key_style),
             Cell::from("Continue (Auto)"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("l").style(key_style),
             Cell::from("Filter Logs"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("H").style(key_style),
             Cell::from("Host List"),
         ]),
-        Row::new(vec![Cell::from(""), Cell::from("")]),
+        Row::new(vec![Cell::from(""), Cell::from(""), Cell::from("")]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Analysis Mode").style(header_style),
             Cell::from(""),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("v").style(key_style),
             Cell::from("Toggle Analysis"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Tab / Shift+Arr").style(key_style),
             Cell::from("Switch Pane"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("j / k").style(key_style),
             Cell::from("Navigate"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Enter").style(key_style),
             Cell::from("Expand/Filtering"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("Shift+h/l").style(key_style),
             Cell::from("Deep Collapse/Expand"),
         ]),
         Row::new(vec![
+            Cell::from(""),
             Cell::from("w").style(key_style),
             Cell::from("Toggle Text Wrapping"),
         ]),
-        Row::new(vec![Cell::from("/").style(key_style), Cell::from("Search")]),
         Row::new(vec![
+            Cell::from(""),
+            Cell::from("/").style(key_style),
+            Cell::from("Search"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
             Cell::from("n / N").style(key_style),
             Cell::from("Next/Prev Match"),
+        ]),
+        Row::new(vec![Cell::from(""), Cell::from(""), Cell::from("")]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("Clipboard (Data Browser)").style(header_style),
+            Cell::from(""),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("0-9").style(key_style),
+            Cell::from("Enter count for next command"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("v").style(key_style),
+            Cell::from("Toggle visual selection mode"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("y").style(key_style),
+            Cell::from("Yank to clipboard (context-aware)"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("    y").style(indent_style),
+            Cell::from("  → Single line yank"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("    5y").style(indent_style),
+            Cell::from("  → Yank 5 lines from current position"),
+        ]),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("    v→5j→y").style(indent_style),
+            Cell::from("  → Visual select 5 lines down, then yank"),
         ]),
     ];
 
     let table = Table::new(
         rows,
-        [Constraint::Percentage(30), Constraint::Percentage(70)],
+        [
+            Constraint::Percentage(15), // Padding for centering
+            Constraint::Percentage(25), // Key
+            Constraint::Percentage(60), // Action
+        ],
     )
     .block(
         Block::default()
             .title("Help")
             .borders(Borders::ALL)
-            .style(Style::default().bg(Color::Black)),
+            .style(Style::default().bg(Color::Blue).fg(Color::White)),
     )
-    .header(Row::new(vec!["Key", "Action"]).style(Style::default().fg(Color::Gray)));
+    .header(
+        Row::new(vec!["", "Key", "Action"]).style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    );
 
     frame.render_widget(Clear, area);
     frame.render_widget(table, area);
@@ -636,4 +708,26 @@ fn draw_detail_view(frame: &mut Frame, app: &mut App) {
 
         frame.render_widget(p, inner_area);
     }
+}
+
+fn draw_connection_alert(frame: &mut Frame) {
+    let area = centered_rect(50, 20, frame.area());
+    let block = Block::default()
+        .title("⚠ Connection Lost")
+        .borders(Borders::ALL)
+        .style(
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let text = "Waiting for Ansible controller to reconnect...\n\n(The playbook process may have terminated or is restarting)";
+    let p = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(p, area);
 }

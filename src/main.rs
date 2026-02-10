@@ -36,10 +36,54 @@ EXAMPLES:
   # Generate an execution report
   ansible-piloteer my_playbook.yml --report report.md
 
+  # Query session data (one-off query)
+  ansible-piloteer query --input session.json.gz \"task_history[?failed].name\"
+  
+  # Interactive REPL mode (no query argument)
+  ansible-piloteer query --input session.json.gz
+
+  # Advanced queries with aggregations
+  ansible-piloteer query --input session.json.gz \"count(task_history[?failed])\"
+  ansible-piloteer query --input session.json.gz \"group_by(task_history, &host)\"
+
+QUERY FEATURES (REPL & CLI):
+  Functions:
+    group_by(arr, expr)  Group array items by expression
+    unique(arr)          Get unique items from array
+    count(arr)           Count items in array
+    sum(arr)             Sum numeric values in array
+    avg(arr)             Average of numeric values
+    min(arr)             Minimum value in array
+    max(arr)             Maximum value in array
+
+  REPL Commands:
+    .help               Show help and available functions
+    .templates          Show pre-built query templates
+    .json               Set output to compact JSON
+    .pretty             Set output to pretty JSON (default)
+    .yaml               Set output to YAML
+    .exit, .quit        Exit REPL
+
 CONFIGURATION (Environment Variables):
-  ANSIBLE_STRATEGY          Must be set to 'piloteer'
-  ANSIBLE_STRATEGY_PLUGINS  Path to 'ansible_plugin/strategies' dir of this repo.
-  OPENAI_API_KEY            Required for AI features.
+  Core:
+    ANSIBLE_STRATEGY          Must be set to 'piloteer'
+    ANSIBLE_STRATEGY_PLUGINS  Path to 'ansible_plugin/strategies' dir
+    PILOTEER_HEADLESS         Run without TUI (for CI/CD)
+  
+  AI Features:
+    OPENAI_API_KEY            OpenAI API key (required for AI features)
+    PILOTEER_MODEL            AI model (default: gpt-4)
+    PILOTEER_BASE_URL         Custom API endpoint (for local LLMs)
+    PILOTEER_QUOTA_TOKENS     Token usage limit
+    PILOTEER_QUOTA_USD        Cost limit in USD
+  
+  Distributed Mode:
+    PILOTEER_SOCKET           Socket path or TCP address
+    PILOTEER_SECRET           Shared secret for authentication
+  
+  OAuth:
+    PILOTEER_GOOGLE_CLIENT_ID      Google OAuth client ID
+    PILOTEER_GOOGLE_CLIENT_SECRET  Google OAuth client secret
 
 TUI CONTROLS:
   General:
@@ -57,13 +101,16 @@ TUI CONTROLS:
     l           Toggle log filter (All/Failed/Changed)
     F           Follow mode (Auto-scroll)
   Analysis Mode:
-    v           Toggle Mode
-    j / k       Navigate
+    v           Toggle Mode / Visual Selection
+    Tab         Switch Pane (Task List <-> Data Browser)
+    j / k       Navigate (supports count: 10j moves 10 lines)
+    0-9         Enter count for next command
     h / l       Collapse/Expand
     Enter       Expand/Collapse
     w           Toggle Text Wrapping
     /           Search Tree
-    y           Yank (Copy)
+    n / N       Next / Previous match
+    y           Yank to clipboard (single/visual/count-based)
   Session:
     Ctrl+s      Save Session Snapshot
     --replay    Replay execution from file
@@ -113,6 +160,17 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         cmd: AuthCmd,
+    },
+    /// Query session data using JMESPath. If query is omitted, enters interactive REPL mode.
+    Query {
+        /// JMESPath query expression (optional)
+        query: Option<String>,
+        /// Path to input session file (e.g., session.json.gz)
+        #[arg(short, long)]
+        input: String,
+        /// Output format: json, yaml, pretty-json
+        #[arg(short, long, default_value = "pretty-json")]
+        format: String,
     },
 }
 
@@ -164,6 +222,83 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Some(Commands::Query {
+            query,
+            input,
+            format,
+        }) => {
+            let session = match ansible_piloteer::session::Session::load(&input) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error loading session from {}: {}", input, e);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(q) = query {
+                // One-off query mode
+                let json_string = match serde_json::to_string(&session) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error serializing session: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let mut runtime = jmespath::Runtime::new();
+                runtime.register_builtin_functions();
+                runtime.register_function(
+                    "group_by",
+                    Box::new(ansible_piloteer::query::GroupBy::new()),
+                );
+                runtime
+                    .register_function("unique", Box::new(ansible_piloteer::query::Unique::new()));
+
+                let expr = match runtime.compile(&q) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("Invalid JMESPath query: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // jmespath::Variable::from_json parses a JSON string into a Variable
+                let variable = jmespath::Variable::from_json(&json_string).unwrap_or_else(|e| {
+                    eprintln!("Error parsing JSON for JMESPath: {}", e);
+                    std::process::exit(1);
+                });
+
+                let result = match expr.search(&variable) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("JMESPath execution error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                match format.as_str() {
+                    "json" => println!("{}", serde_json::to_string(&result).unwrap()),
+                    "pretty-json" => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                    "yaml" => {
+                        println!("{}", serde_yaml::to_string(&result).unwrap());
+                    }
+                    _ => {
+                        eprintln!(
+                            "Unknown format: {}. Supported: json, pretty-json, yaml",
+                            format
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Interactive REPL mode
+                if let Err(e) = ansible_piloteer::repl::run(&session) {
+                    eprintln!("REPL Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            Ok(())
+        }
         None => {
             run_tui(
                 cli.playbook,
@@ -246,7 +381,7 @@ async fn run_tui(
 
     // Only start IPC if NOT in replay mode
     if !app.replay_mode {
-        app.set_ipc_tx(from_app_tx.clone());
+        app.set_ipc_tx(Some(from_app_tx.clone()));
 
         // Spawn IPC Server Task
         tokio::spawn(async move {
@@ -273,85 +408,91 @@ async fn run_tui(
                 writeln!(f, "DEBUG: IPC Task Started").expect("Failed to write to log");
             }
 
-            match server.accept().await {
-                Ok(mut conn) => {
-                    // Log connection
-                    {
-                        use std::io::Write;
-                        let mut f = std::fs::OpenOptions::new()
-                            .append(true)
-                            .open("/tmp/piloteer_debug.log")
-                            .expect("Failed to open /tmp/piloteer_debug.log for connection");
-                        writeln!(f, "DEBUG: IPC Connection Accepted")
-                            .expect("Failed to write connection log");
-                    }
-                    loop {
-                        tokio::select! {
-                            // Receive from Ansible
-                            incoming = conn.receive() => {
-                                match incoming {
-                                    Ok(Some(msg)) => {
-                                        {
-                                           use std::io::Write;
-                                           if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
-                                               writeln!(f, "DEBUG: Received Msg: {:?}", msg).ok();
-                                           }
-                                        }
-                                        // Authentication Check
-                                        if let Message::Handshake { token } = &msg {
-                                            let authorized = match &secret_token {
-                                                Some(expected) => token.as_deref() == Some(expected),
-                                                None => true, // No secret configured == allow all (or maybe allow only if local?)
-                                            };
+            loop {
+                match server.accept().await {
+                    Ok(mut conn) => {
+                        // Log connection
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .append(true)
+                                .open("/tmp/piloteer_debug.log")
+                            {
+                                writeln!(f, "DEBUG: IPC Connection Accepted").ok();
+                            }
+                        }
 
-                                            if !authorized {
-                                                {
-                                                   use std::io::Write;
-                                                   if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
-                                                       writeln!(f, "DEBUG: Auth Failed").ok();
-                                                   }
+                        let mut connected = true;
+                        while connected {
+                            tokio::select! {
+                                // Receive from Ansible
+                                incoming = conn.receive() => {
+                                    match incoming {
+                                        Ok(Some(msg)) => {
+                                            // Handle Handshake
+                                            if let Message::Handshake { token } = &msg {
+                                                let authorized = match &secret_token {
+                                                    Some(expected) => token.as_deref() == Some(expected),
+                                                    None => true,
+                                                };
+
+                                                if !authorized {
+                                                    eprintln!("Authentication Failed: Invalid Token");
+                                                    break; // Break inner loop
                                                 }
-                                                eprintln!("Authentication Failed: Invalid Token");
-                                                break;
+                                                let _ = to_app_tx.send(Message::Handshake { token: token.clone() }).await;
+                                                continue;
                                             }
 
-                                            let _ = to_app_tx.send(Message::Handshake { token: token.clone() }).await;
-                                            continue;
+                                            if to_app_tx.send(msg).await.is_err() {
+                                                // App closed
+                                                return;
+                                            }
                                         }
-
-                                        // Block messages if not handshaken/authorized?
-                                        // For simplicity in this loop, we assume blocking happens at app level or we just trust after handshake.
-                                        // Ideally we should track `is_authenticated` state here.
-
-                                        if to_app_tx.send(msg).await.is_err() {
-                                            break;
+                                        Ok(None) => {
+                                            // EOF
+                                            {
+                                                use std::io::Write;
+                                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
+                                                    writeln!(f, "DEBUG: IPC EOF").ok();
+                                                }
+                                            }
+                                            let _ = to_app_tx.send(Message::ClientDisconnected).await;
+                                            connected = false;
+                                        }
+                                        Err(e) => {
+                                            // Error
+                                            {
+                                                use std::io::Write;
+                                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
+                                                    writeln!(f, "DEBUG: IPC Error: {}", e).ok();
+                                                }
+                                            }
+                                            let _ = to_app_tx.send(Message::ClientDisconnected).await;
+                                            connected = false;
                                         }
                                     }
-                                    Ok(None) => break, // EOF
-                                    Err(_) => break, // Error
                                 }
-                            }
-                            // Send to Ansible
-                            outgoing = from_app_rx.recv() => {
-                                if let Some(msg) = outgoing {
-                                    {
-                                       use std::io::Write;
-                                       if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
-                                           writeln!(f, "DEBUG: Sending Msg: {:?}", msg).ok();
-                                       }
+                                // Send to Ansible
+                                outgoing = from_app_rx.recv() => {
+                                    match outgoing {
+                                        Some(msg) => {
+                                            if conn.send(&msg).await.is_err() {
+                                                // Send failed, disconnect
+                                                let _ = to_app_tx.send(Message::ClientDisconnected).await;
+                                                connected = false;
+                                            }
+                                        }
+                                        None => return, // App shutdown
                                     }
-                                    if conn.send(&msg).await.is_err() {
-                                        break;
-                                    }
-                                } else {
-                                    break;
                                 }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!("Accept error: {}", e);
+                    Err(e) => {
+                        eprintln!("Accept error: {}", e);
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    }
                 }
             }
         });
@@ -547,6 +688,7 @@ async fn run_app(
                     Some(msg) => {
                         match msg {
                             Message::Handshake { token: _ } => {
+                                app.client_connected = true; // [NEW]
                                 app.log("Connected".to_string(), Some(ratatui::style::Color::Cyan));
                                 if headless { println!("Headless: Ansible Connected"); }
                                 if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
@@ -669,6 +811,11 @@ async fn run_app(
 
                                 // Notification
                                 app.notification = Some(("AI Analysis Ready. Press 'v' to view.".to_string(), std::time::Instant::now()));
+                            }
+                            Message::ClientDisconnected => {
+                                app.client_connected = false;
+                                app.log("Client Disconnected".to_string(), Some(ratatui::style::Color::Red));
+                                if headless { println!("Headless: Client Disconnected"); }
                             }
                             Message::ModifyVar { .. } => {} // Handled elsewhere or just for IPC
                             Message::Proceed | Message::Retry | Message::Continue => {}
@@ -840,11 +987,39 @@ async fn run_app(
                                };
                                app.copy_to_clipboard(content);
                            }
-                       }
+                        }
+                        Action::YankVisual => {
+                            // Phase 16: Visual mode yank
+                            if app.show_analysis && app.visual_mode {
+                                if let Some(tree) = &app.analysis_tree
+                                    && let Some(start) = app.visual_start_index
+                                {
+                                    let end = tree.selected_line;
+                                    if let Some(content) = tree.get_range_content(start, end) {
+                                        app.copy_to_clipboard(content);
+                                    }
+                                }
+                                // Exit visual mode after yank
+                                app.visual_mode = false;
+                                app.visual_start_index = None;
+                            }
+                        }
+                        Action::YankWithCount => {
+                            // Phase 16: Count-based yank (y3j)
+                            if app.show_analysis {
+                                if let Some(tree) = &app.analysis_tree
+                                    && let Some(count) = app.pending_count
+                                    && let Some(content) = tree.get_content_with_count(count)
+                                {
+                                    app.copy_to_clipboard(content);
+                                }
+                                app.pending_count = None;
+                            }
+                        }
 
-                       _ => {}
-                    }
+                        _ => {}
                  }
+                     }
             }, // End input_rx match
 
             _ = tick => {}

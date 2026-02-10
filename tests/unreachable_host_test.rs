@@ -60,6 +60,9 @@ fn test_unreachable_app_state_tracking() {
         quota_limit_usd: None,
         google_client_id: None,
         google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
     });
 
     let mut app = App::new(config);
@@ -103,6 +106,9 @@ fn test_multiple_unreachable_hosts() {
         quota_limit_usd: None,
         google_client_id: None,
         google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
     });
 
     let mut app = App::new(config);
@@ -154,6 +160,9 @@ fn test_unreachable_session_persistence() {
         quota_limit_usd: None,
         google_client_id: None,
         google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
     });
 
     let mut app = App::new(config);
@@ -228,6 +237,9 @@ fn test_unreachable_with_normal_tasks() {
         quota_limit_usd: None,
         google_client_id: None,
         google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
     });
 
     let mut app = App::new(config);

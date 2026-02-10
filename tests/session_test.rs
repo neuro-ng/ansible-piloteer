@@ -17,6 +17,9 @@ fn test_session_save_and_load() {
         quota_limit_usd: None,
         google_client_id: None,
         google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
     });
 
     // We need to construct App manually or via new

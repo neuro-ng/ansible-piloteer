@@ -46,6 +46,7 @@ pub enum Message {
     PlayRecap {
         stats: serde_json::Value,
     },
+    ClientDisconnected, // [NEW] Phase 3: Connection Handling
 }
 
 pub enum Listener {

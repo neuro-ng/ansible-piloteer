@@ -20,6 +20,9 @@ pub struct Config {
     pub quota_limit_usd: Option<f64>,    // [NEW]
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    pub zipkin_endpoint: Option<String>,
+    pub zipkin_service_name: String,
+    pub zipkin_sample_rate: f64,
 }
 
 impl Config {
@@ -54,6 +57,9 @@ impl Config {
             .set_default("quota_limit_usd", None::<f64>)?
             .set_default("google_client_id", None::<String>)?
             .set_default("google_client_secret", None::<String>)?
+            .set_default("zipkin_endpoint", None::<String>)?
+            .set_default("zipkin_service_name", "ansible-piloteer")?
+            .set_default("zipkin_sample_rate", 1.0)?
             .add_source(File::with_name("piloteer").required(false)) // CWD
             .add_source(Environment::with_prefix("PILOTEER"));
 

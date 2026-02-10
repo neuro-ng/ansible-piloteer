@@ -54,3 +54,19 @@ Accessible via `v` key. Splits the screen into:
 *   **Data Browser** (Right): A navigable tree view of verbose task data.
     *   **Navigation**: `j`/`k` to move, `Enter` to expand/collapse.
     *   **Search**: `/` to search within the JSON structure.
+
+---
+
+## Connection Status
+
+The Inspector Pane now displays a prominent **"Connection Lost"** status or overlay if communication with the Ansible controller is interrupted. The application will automatically attempt to reconnect.
+
+---
+
+## Query CLI
+
+The `ansible-piloteer` CLI supports data querying via the `query` subcommand.
+
+*   `query`: Execute JMESPath queries against session data.
+    *   `--input`: Path to session file (e.g., `session.json.gz`).
+    *   `--format`: Output format (`json`, `yaml`, `pretty-json`).

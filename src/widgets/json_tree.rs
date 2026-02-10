@@ -405,6 +405,37 @@ impl JsonTreeState {
             .get(self.selected_line)
             .map(|line| line.path.clone())
     }
+
+    /// Get content for a range of lines (Phase 16: Multi-Line Copy)
+    pub fn get_range_content(&self, start: usize, end: usize) -> Option<String> {
+        let start_idx = start.min(end);
+        let end_idx = start.max(end);
+
+        if end_idx >= self.lines.len() {
+            return None;
+        }
+
+        let mut result = Vec::new();
+        for i in start_idx..=end_idx {
+            if let Some(line) = self.lines.get(i) {
+                let content = if let Some(key) = &line.key {
+                    format!("{}: {}", key, line.value_str)
+                } else {
+                    line.value_str.clone()
+                };
+                result.push(content);
+            }
+        }
+
+        Some(result.join("\n"))
+    }
+
+    /// Get content from current line + count lines down (Phase 16: Multi-Line Copy)
+    pub fn get_content_with_count(&self, count: usize) -> Option<String> {
+        let start = self.selected_line;
+        let end = (self.selected_line + count).min(self.lines.len().saturating_sub(1));
+        self.get_range_content(start, end)
+    }
 }
 
 pub struct JsonTree;

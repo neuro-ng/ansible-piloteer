@@ -83,6 +83,15 @@ export PILOTEER_BIND_ADDR="0.0.0.0:8765"
 sudo ufw status
 ```
 
+### Problem: "Connection Lost" Overlay Appears
+
+**Cause**: The Ansible playbook process terminated unexpectedly or the IPC connection dropped.
+
+**Solution**:
+- Check if the playbook finished execution.
+- Check Ansible logs for crashes.
+- The application will automatically attempt to reconnect if the process restarts.
+
 ---
 
 ## IPC Socket Errors

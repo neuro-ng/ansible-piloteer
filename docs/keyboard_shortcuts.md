@@ -62,7 +62,9 @@ Complete reference of all keyboard shortcuts in Ansible Piloteer.
 | `Shift+h` | Deep collapse (recursive) |
 | `Shift+l` | Deep expand (recursive) |
 | `w` | Toggle text wrapping (truncate long lines with '...') |
-| `y` | Copy current value to clipboard |
+| `v` | Toggle visual selection mode |
+| `0-9` | Enter count for next command |
+| `y` | Copy current value / selection to clipboard (supports count e.g. `5y`) |
 | `/` | Search in data |
 | `n` | Next search result |
 | `N` | Previous search result |
