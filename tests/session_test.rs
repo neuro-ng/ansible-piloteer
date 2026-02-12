@@ -33,7 +33,7 @@ fn test_session_save_and_load() {
         host: "localhost".to_string(),
         changed: true,
         failed: false,
-            duration: 0.0,
+        duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
