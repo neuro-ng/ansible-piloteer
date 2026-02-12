@@ -25,6 +25,10 @@ flate2 = "1.1.9"
 jmespath = "0.5.0"
 serde_yaml = "0.9.34"
 rustyline = "17.0.2"
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-rustls"] }
+regex = "1.12.3"
 
 [dev-dependencies]
 tempfile = "3.24.0"

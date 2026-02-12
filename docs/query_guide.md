@@ -52,6 +52,41 @@ ansible-piloteer query --input session.json.gz
 |----------|-------------|---------|
 | `group_by(array, expr)` | Group items by expression | `group_by(task_history, &host)` |
 | `unique(array)` | Get unique items | `unique(task_history[*].host)` |
+| `split(string, sep)` | Split string by separator | `split('a,b,c', ',')` |
+| `replace(string, old, new)` | Replace substring | `replace('hello world', 'world', 'universe')` |
+| `matches(string, regex)` | Check regex match | `matches('123', '^\\d+$')` |
+
+## Custom Filters
+
+You can define your own reusable filters in `piloteer.toml`. These filters can be used in queries just like built-in functions.
+
+### Configuration
+
+Add a `[filters]` section to your `~/.config/ansible-piloteer/piloteer.toml`:
+
+```toml
+[filters]
+# Count all failed tasks
+count_failed = "count(task_history[?failed])"
+
+# Get a list of unique changed hosts
+changed_hosts = "unique(task_history[?changed].host)"
+
+# Check if any critical task failed (example with regex match on task name)
+critical_failure = "task_history[?failed && matches(name, '(?i)critical')]"
+```
+
+### Usage
+
+Use the filter name in your query as a function call, passing the context (usually `@` or specific data):
+
+```bash
+# Use custom filter
+ansible-piloteer query "count_failed(@)"
+
+# Combine with other logic
+ansible-piloteer query "changed_hosts(@) | sort(@)"
+```
 
 ## Query Templates
 

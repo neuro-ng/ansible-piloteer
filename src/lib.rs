@@ -11,5 +11,6 @@ pub mod quota;
 pub mod repl;
 pub mod report;
 pub mod session;
+pub mod tracing;
 pub mod ui;
 pub mod widgets;

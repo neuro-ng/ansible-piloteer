@@ -85,10 +85,33 @@ impl AiClient {
         vars: &serde_json::Value,
         facts: Option<&serde_json::Value>,
     ) -> Result<Analysis> {
+        // Create AI span as child of current context (task span)
+        let ai_span = crate::tracing::create_child_span(
+            "ai.analyze_failure",
+            vec![
+                opentelemetry::KeyValue::new("ai.model", self.model.clone()),
+                opentelemetry::KeyValue::new("ai.task_name", task_name.to_string()),
+                opentelemetry::KeyValue::new("ai.api_base", self.api_base.clone()),
+            ],
+        );
+
+        // Attach span to context (guard is dropped immediately, but span remains in context)
+        let _ = crate::tracing::attach_span(ai_span);
+
+        // Record start time for response time tracking
+        let start = std::time::Instant::now();
+
         // Check Quota
         {
             let tracker = self.quota_tracker.lock().unwrap();
-            tracker.check_limit(&self.config)?;
+            if let Err(e) = tracker.check_limit(&self.config) {
+                // Record quota error on span
+                crate::tracing::record_error_on_current_span(&format!(
+                    "Quota limit exceeded: {}",
+                    e
+                ));
+                return Err(e);
+            }
         }
 
         let system_prompt = "You are an expert Ansible debugger. \
@@ -132,16 +155,33 @@ impl AiClient {
             builder = builder.header("Authorization", format!("Bearer {}", key));
         }
 
-        let response = builder
-            .json(&request)
-            .send()
-            .await
-            .context(format!("Failed to send request to AI at {}", url))?;
+        let response = match builder.json(&request).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Record API error on span
+                crate::tracing::record_error_on_current_span(&format!(
+                    "Failed to send request to AI: {}",
+                    e
+                ));
+                return Err(anyhow::anyhow!(
+                    "Failed to send request to AI at {}: {}",
+                    url,
+                    e
+                ));
+            }
+        };
 
-        let chat_response: ChatResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI response")?;
+        let chat_response: ChatResponse = match response.json().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Record parsing error on span
+                crate::tracing::record_error_on_current_span(&format!(
+                    "Failed to parse AI response: {}",
+                    e
+                ));
+                return Err(anyhow::anyhow!("Failed to parse OpenAI response: {}", e));
+            }
+        };
 
         if let Some(choice) = chat_response.choices.first() {
             let content = &choice.message.content;
@@ -155,10 +195,19 @@ impl AiClient {
             if let Err(e) = self.log_interaction(&user_content, content, tokens).await {
                 eprintln!("Failed to log AI interaction: {}", e);
             }
-            if let Err(e) = self.log_interaction(&user_content, content, tokens).await {
-                eprintln!("Failed to log AI interaction: {}", e);
-            }
-            let mut analysis = Self::parse_response(content)?;
+
+            let mut analysis = match Self::parse_response(content) {
+                Ok(a) => a,
+                Err(e) => {
+                    // Record parsing error on span
+                    crate::tracing::record_error_on_current_span(&format!(
+                        "Failed to parse AI JSON response: {}",
+                        e
+                    ));
+                    return Err(e);
+                }
+            };
+
             analysis.tokens_used = tokens;
 
             // Update Quota
@@ -166,8 +215,19 @@ impl AiClient {
                 let _ = tracker.add_usage(tokens, &self.model);
             }
 
+            // Record success metrics on span
+            let duration_ms = start.elapsed().as_millis() as i64;
+            crate::tracing::add_attributes_to_current_span(vec![
+                opentelemetry::KeyValue::new("ai.response_time_ms", duration_ms),
+                opentelemetry::KeyValue::new("ai.tokens_used", tokens as i64),
+                opentelemetry::KeyValue::new("ai.success", true),
+                opentelemetry::KeyValue::new("ai.fix_suggested", analysis.fix.is_some()),
+            ]);
+
             Ok(analysis)
         } else {
+            // Record error on span
+            crate::tracing::record_error_on_current_span("No response content from AI");
             Err(anyhow::anyhow!("No response content from AI"))
         }
     }

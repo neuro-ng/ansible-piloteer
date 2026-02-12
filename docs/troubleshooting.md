@@ -83,7 +83,7 @@ export PILOTEER_BIND_ADDR="0.0.0.0:8765"
 sudo ufw status
 ```
 
-### Problem: "Connection Lost" Overlay Appears
+### Problem: "DISCONNECTED" Status Appears
 
 **Cause**: The Ansible playbook process terminated unexpectedly or the IPC connection dropped.
 

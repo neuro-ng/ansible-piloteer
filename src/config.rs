@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use config::{Config as ConfigLoader, Environment, File};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::PathBuf; // [NEW]
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -23,6 +24,7 @@ pub struct Config {
     pub zipkin_endpoint: Option<String>,
     pub zipkin_service_name: String,
     pub zipkin_sample_rate: f64,
+    pub filters: Option<HashMap<String, String>>, // [NEW]
 }
 
 impl Config {
@@ -60,6 +62,7 @@ impl Config {
             .set_default("zipkin_endpoint", None::<String>)?
             .set_default("zipkin_service_name", "ansible-piloteer")?
             .set_default("zipkin_sample_rate", 1.0)?
+            .set_default("filters", None::<HashMap<String, String>>)? // [NEW]
             .add_source(File::with_name("piloteer").required(false)) // CWD
             .add_source(Environment::with_prefix("PILOTEER"));
 

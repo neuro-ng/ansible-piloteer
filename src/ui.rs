@@ -12,7 +12,9 @@ use ratatui::{
 use crate::widgets::json_tree::JsonTree;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if app.show_analysis {
+    if app.show_metrics {
+        crate::widgets::metrics::MetricsDashboard::draw(frame, app, frame.area());
+    } else if app.show_analysis {
         draw_analysis(frame, app);
     } else {
         let chunks = Layout::default()
@@ -36,9 +38,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     // [NEW] Phase 3: Connection Alert
-    if !app.replay_mode && !app.is_connected() {
-        draw_connection_alert(frame);
-    }
+    // Check moved to Status Window
 }
 
 fn draw_host_list(frame: &mut Frame, app: &mut App) {
@@ -276,12 +276,12 @@ fn draw_inspector(frame: &mut Frame, app: &mut App, area: Rect) {
     // Determine layout: Status (Fixed), Variables (Min), Pilot (Fixed/Min if active)
     let constraints = if app.asking_ai || app.suggestion.is_some() {
         vec![
-            Constraint::Length(3),      // Status
+            Constraint::Length(6),      // Status (Increased for multi-line)
             Constraint::Min(0),         // Vars
             Constraint::Percentage(30), // Pilot
         ]
     } else {
-        vec![Constraint::Length(3), Constraint::Min(0)]
+        vec![Constraint::Length(6), Constraint::Min(0)]
     };
 
     let chunks = Layout::default()
@@ -290,7 +290,25 @@ fn draw_inspector(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // Status Area
-    let status_text = if app.failed_task.is_some() {
+    let status_text = if !app.replay_mode && !app.is_connected() {
+        // Disconnected State
+        vec![
+            Line::from(vec![
+                Span::raw("Status: "),
+                Span::styled(
+                    "DISCONNECTED",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::raw("Waiting for Ansible controller to reconnect...")),
+            Line::from(Span::styled(
+                "(Playbook process may be restarting)",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else if app.failed_task.is_some() {
         let mut status_text = vec![
             Line::from(vec![
                 Span::raw("Status: "),
@@ -708,26 +726,4 @@ fn draw_detail_view(frame: &mut Frame, app: &mut App) {
 
         frame.render_widget(p, inner_area);
     }
-}
-
-fn draw_connection_alert(frame: &mut Frame) {
-    let area = centered_rect(50, 20, frame.area());
-    let block = Block::default()
-        .title("⚠ Connection Lost")
-        .borders(Borders::ALL)
-        .style(
-            Style::default()
-                .bg(Color::Red)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let text = "Waiting for Ansible controller to reconnect...\n\n(The playbook process may have terminated or is restarting)";
-    let p = Paragraph::new(text)
-        .block(block)
-        .alignment(ratatui::layout::Alignment::Center)
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(p, area);
 }

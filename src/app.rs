@@ -24,7 +24,9 @@ pub enum Action {
     YankVisual,    // [NEW] Phase 16: Visual mode yank
     YankWithCount, // [NEW] Phase 16: Count-based yank (y3j)
     SaveSession,
-    ExportReport, // [NEW]
+    ExportReport,      // [NEW]
+    ToggleMetrics,     // [NEW] Phase 22
+    ToggleMetricsView, // [NEW] Phase 22
     None,
 }
 
@@ -44,7 +46,8 @@ pub struct App {
     pub logs: VecDeque<(String, ratatui::style::Color)>,
     pub current_task: Option<String>,
     pub task_vars: Option<serde_json::Value>,
-    pub facts: Option<serde_json::Value>, // [NEW]
+    pub facts: Option<serde_json::Value>,            // [NEW]
+    pub task_start_time: Option<std::time::Instant>, // [NEW] Phase 22
     pub failed_task: Option<String>,
     pub failed_result: Option<serde_json::Value>,
     pub waiting_for_proceed: bool,
@@ -77,6 +80,8 @@ pub struct App {
     pub hosts: std::collections::HashMap<String, HostStatus>,
     pub host_list_index: usize,
     pub show_detail_view: bool,
+    pub show_metrics: bool,        // [NEW] Phase 22
+    pub metrics_view: MetricsView, // [NEW] Phase 22
     // Communication
     pub ipc_tx: Option<mpsc::Sender<Message>>,
     pub client_connected: bool, // [NEW] Track active client connection
@@ -86,6 +91,12 @@ pub struct App {
     pub visual_start_index: Option<usize>,
     pub pending_count: Option<usize>,
     pub pending_command: Option<char>,
+    // Tracing State (Phase 21: OpenZipkin)
+    pub playbook_span: Option<opentelemetry::global::BoxedSpan>,
+    pub playbook_span_guard: Option<opentelemetry::ContextGuard>,
+    pub task_spans: std::collections::HashMap<String, opentelemetry::global::BoxedSpan>,
+    pub play_span: Option<opentelemetry::global::BoxedSpan>,
+    pub play_span_guard: Option<opentelemetry::ContextGuard>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -110,9 +121,16 @@ pub struct TaskHistory {
     pub host: String,
     pub changed: bool,
     pub failed: bool,
+    pub duration: f64, // [NEW] Seconds
     pub error: Option<String>,
     pub verbose_result: Option<crate::execution::ExecutionDetails>,
     pub analysis: Option<crate::ai::Analysis>, // [NEW]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MetricsView {
+    Dashboard,
+    Heatmap,
 }
 
 impl App {
@@ -132,6 +150,7 @@ impl App {
             logs: VecDeque::new(),
             history: Vec::new(), // [NEW]
             current_task: None,
+            task_start_time: None, // [NEW]
             task_vars: None,
             facts: None,
             failed_task: None,
@@ -166,12 +185,20 @@ impl App {
             hosts: std::collections::HashMap::new(),
             host_list_index: 0,
             show_detail_view: false,
+            show_metrics: false,                  // [NEW] Phase 22
+            metrics_view: MetricsView::Dashboard, // [NEW] Phase 22
             unreachable_hosts: std::collections::HashSet::new(),
             // Visual Mode State
             visual_mode: false,
             visual_start_index: None,
             pending_count: None,
             pending_command: None,
+            // Tracing State
+            playbook_span: None,
+            playbook_span_guard: None,
+            task_spans: std::collections::HashMap::new(),
+            play_span: None,
+            play_span_guard: None,
         }
     }
 
@@ -545,6 +572,7 @@ impl App {
                         return Action::None;
                     }
                     KeyCode::Char('v') => return Action::ToggleAnalysis,
+                    KeyCode::Char('m') => return Action::ToggleMetrics, // [NEW] Phase 22
                     KeyCode::Char('y') => return Action::Yank,
 
                     _ => {}
@@ -648,6 +676,7 @@ impl App {
         host: String,
         changed: bool,
         failed: bool,
+        duration: f64, // [NEW]
         error: Option<String>,
         verbose_result: Option<crate::execution::ExecutionDetails>,
         analysis: Option<crate::ai::Analysis>,
@@ -658,6 +687,7 @@ impl App {
             host: host.clone(),
             changed,
             failed,
+            duration, // [NEW]
             error,
             verbose_result,
             analysis,
@@ -774,7 +804,8 @@ impl App {
             name: task,
             host: host.clone(),
             changed: false,
-            failed: true, // Treat as failed for reporting
+            failed: true,  // Treat as failed for reporting
+            duration: 0.0, // [NEW] Unreachable tasks have no duration
             error: Some(serde_json::to_string(&result).unwrap_or_else(|_| error.clone())),
             verbose_result: None,
             analysis: None,

@@ -12,6 +12,12 @@
         -   **Deep Navigation**: Recursive expand/collapse (`Shift+h`/`Shift+l`).
         -   **Detail View**: Inspect long values in a popup (`w`).
     -   **Host Targeting**: List hosts, filter history, and inspect facts per host (`H` to list, `f` for facts).
+-   **Data Query & Transformation**:
+    -   **Interactive REPL**: Query session data with JMESPath expressions.
+    -   **Aggregation Functions**: `count()`, `sum()`, `avg()`, `min()`, `max()` for data analysis.
+    -   **Custom Functions**: `group_by()`, `unique()` for advanced data manipulation.
+    -   **Query Templates**: Pre-built queries for common use cases (failed tasks, changed hosts, etc.).
+    -   **Multiple Formats**: Output as JSON, YAML, or pretty-printed JSON.
 -   **AI-Powered Debugging**:
     -   **Ask Pilot**: Analyze failures using LLMs (OpenAI, Local LLMs) to get plain-English explanations.
     -   **Auto-Fix**: Automatically apply AI-suggested variable fixes with a single keystroke.
@@ -21,6 +27,10 @@
 -   **Session Persistence**:
     -   **Save/Load**: Snapshot your session (`Ctrl+s`) and replay it later (`--replay`).
     -   **Reporting**: Export detailed Markdown reports of your debugging session (`Ctrl+e`).
+-   **Distributed Tracing**:
+    -   **OpenZipkin Integration**: Deep observability into playbook execution with distributed tracing.
+    -   **Performance Monitoring**: Track execution times, identify bottlenecks, and visualize execution flow.
+    -   **Configurable Sampling**: Control trace volume with probabilistic sampling.
 -   **Deep Execution Analysis**:
     -   **Play Recap**: View aggregated execution statistics.
     -   **Clipboard**: Copy data with `y`.
@@ -81,11 +91,26 @@ To use the hosted AI features with Google Login:
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| **Core** | | |
+| `ANSIBLE_STRATEGY` | Must be set to 'piloteer' | None |
+| `ANSIBLE_STRATEGY_PLUGINS` | Path to ansible_plugin/strategies | None |
+| `PILOTEER_HEADLESS` | Run without TUI (for CI/CD) | false |
+| `PILOTEER_SOCKET` | Path to IPC socket or `host:port` | `/tmp/piloteer.sock` |
+| **AI Features** | | |
 | `OPENAI_API_KEY` | API Key for OpenAI (or compatible providers) | None |
 | `PILOTEER_MODEL` | LLM Model to use | `gpt-4-turbo-preview` |
-| `PILOTEER_API_BASE` | Base URL for LLM API (e.g. for Local LLMs) | `https://api.openai.com/v1` |
-| `PILOTEER_SOCKET` | Path to the IPC socket or `host:port` | `/tmp/piloteer.sock` |
+| `PILOTEER_BASE_URL` | Base URL for LLM API (for Local LLMs) | `https://api.openai.com/v1` |
+| `PILOTEER_QUOTA_TOKENS` | Token usage limit | None |
+| `PILOTEER_QUOTA_USD` | Cost limit in USD | None |
+| **Distributed Mode** | | |
 | `PILOTEER_SECRET` | Shared secret for TCP authentication | None |
+| **Tracing** | | |
+| `PILOTEER_ZIPKIN_ENDPOINT` | Zipkin server URL (e.g., `http://localhost:9411`) | None |
+| `PILOTEER_ZIPKIN_SERVICE_NAME` | Service name in traces | `ansible-piloteer` |
+| `PILOTEER_ZIPKIN_SAMPLE_RATE` | Sampling rate (0.0-1.0) | `1.0` |
+| **OAuth** | | |
+| `PILOTEER_GOOGLE_CLIENT_ID` | Google OAuth client ID | None |
+| `PILOTEER_GOOGLE_CLIENT_SECRET` | Google OAuth client secret | None |
 
 
 ## 🏃 Usage
@@ -190,6 +215,8 @@ When a task fails, the Piloteer enters **Debug Mode**:
 - [Reporting](docs/reporting.md) - Generate execution reports
 - [Deep Analysis](docs/deep_analysis.md) - Data browser and analysis mode
 - [Error Handling](docs/error_handling.md) - Unreachable hosts and error recovery
+- [Query Guide](docs/query_guide.md) - JMESPath queries and REPL mode
+- [Zipkin Tracing](docs/zipkin_tracing.md) - Distributed tracing with OpenZipkin
 
 ### Advanced Topics
 - [Distributed Mode](docs/distributed_mode.md) - Remote debugging setup

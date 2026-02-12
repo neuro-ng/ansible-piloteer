@@ -22,6 +22,7 @@ Always visible at the top of the pane.
     *   `RUNNING` (Green): Playbook is executing normally.
     *   `FROZEN` (Yellow): Execution is paused (e.g., waiting for user input or at a breakpoint).
     *   `TASK FAILED` (Red): A task has failed and requires attention.
+    *   `DISCONNECTED` (Yellow): Communication with the Ansible controller has been lost.
 *   **Current Task**: Displays the name of the active task.
 *   **Drift**: Shows the number of tasks that have changed the system state vs. total tasks (e.g., `2 changed / 10 total`).
 *   **AI Quota**: Displays current session token usage and estimated cost (visible only if AI is enabled).
@@ -59,7 +60,7 @@ Accessible via `v` key. Splits the screen into:
 
 ## Connection Status
 
-The Inspector Pane now displays a prominent **"Connection Lost"** status or overlay if communication with the Ansible controller is interrupted. The application will automatically attempt to reconnect.
+The Inspector Pane displays a **"DISCONNECTED"** status (in yellow) if communication with the Ansible controller is interrupted. The application will automatically attempt to reconnect, and the status pane will show a waiting message.
 
 ---
 

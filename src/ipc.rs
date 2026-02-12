@@ -1,8 +1,9 @@
 use anyhow::Result;
+use opentelemetry::trace::Span;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream}; // [NEW]
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
@@ -13,6 +14,10 @@ pub enum Message {
         name: String,
         task_vars: serde_json::Value,
         facts: Option<serde_json::Value>,
+    },
+    PlayStart {
+        name: String,
+        host_pattern: String,
     },
     TaskFail {
         name: String,
@@ -150,20 +155,44 @@ impl IpcConnection {
     }
 
     pub async fn send(&mut self, msg: &Message) -> Result<()> {
-        let mut json = serde_json::to_string(msg)?;
-        json.push('\n');
-        self.stream.write_all(json.as_bytes()).await?;
-        self.stream.flush().await?;
-        Ok(())
+        let mut span =
+            crate::tracing::start_span("ipc.send", opentelemetry::trace::SpanKind::Producer);
+
+        let result: Result<()> = async {
+            let mut json = serde_json::to_string(msg)?;
+            json.push('\n');
+            self.stream.write_all(json.as_bytes()).await?;
+            self.stream.flush().await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = &result {
+            crate::tracing::record_error_on_span(&mut span, &e.to_string());
+        }
+        span.end();
+        result
     }
 
     pub async fn receive(&mut self) -> Result<Option<Message>> {
-        let mut reader = BufReader::new(&mut self.stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line).await? == 0 {
-            return Ok(None);
+        let mut span =
+            crate::tracing::start_span("ipc.receive", opentelemetry::trace::SpanKind::Consumer);
+
+        let result: Result<Option<Message>> = async {
+            let mut reader = BufReader::new(&mut self.stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await? == 0 {
+                return Ok(None);
+            }
+            let msg = serde_json::from_str(&line)?;
+            Ok(Some(msg))
         }
-        let msg = serde_json::from_str(&line)?;
-        Ok(Some(msg))
+        .await;
+
+        if let Err(e) = &result {
+            crate::tracing::record_error_on_span(&mut span, &e.to_string());
+        }
+        span.end();
+        result
     }
 }

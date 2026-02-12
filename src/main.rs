@@ -6,7 +6,8 @@ use crossterm::{
     execute,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::{io, time::Duration};
+use std::io;
+use std::time::{Duration, Instant}; // [MODIFY]
 // use tokio::net::TcpListener; // Unused for now
 use tokio::sync::mpsc;
 
@@ -184,14 +185,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let auto_analyze = cli.auto_analyze;
 
-    match cli.command {
+    // Load config early for tracing initialization
+    let config = Config::new().unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {}", e);
+        std::process::exit(1);
+    });
+
+    // Initialize tracing if configured
+    if let Err(e) = ansible_piloteer::tracing::init_tracing(&config) {
+        eprintln!("Warning: Failed to initialize tracing: {}", e);
+    }
+
+    let result = match cli.command {
         Some(Commands::Auth { cmd }) => match cmd {
             AuthCmd::Login => {
-                let config = Config::new().unwrap_or_else(|e| {
-                    eprintln!("Failed to load config: {}", e);
-                    std::process::exit(1);
-                });
-
                 // If credentials are provided in config, use them. Otherwise pass None to use built-in defaults.
                 let (client_id, client_secret) =
                     (config.google_client_id, config.google_client_secret);
@@ -247,12 +254,17 @@ async fn main() -> Result<()> {
 
                 let mut runtime = jmespath::Runtime::new();
                 runtime.register_builtin_functions();
-                runtime.register_function(
-                    "group_by",
-                    Box::new(ansible_piloteer::query::GroupBy::new()),
-                );
-                runtime
-                    .register_function("unique", Box::new(ansible_piloteer::query::Unique::new()));
+                ansible_piloteer::query::register_functions(&mut runtime);
+
+                // Register user-defined filters
+                if let Some(filters) = &config.filters {
+                    for (name, expr) in filters {
+                        runtime.register_function(
+                            name,
+                            Box::new(ansible_piloteer::query::CustomFilter::new(expr.clone())),
+                        );
+                    }
+                }
 
                 let expr = match runtime.compile(&q) {
                     Ok(e) => e,
@@ -292,7 +304,7 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // Interactive REPL mode
-                if let Err(e) = ansible_piloteer::repl::run(&session) {
+                if let Err(e) = ansible_piloteer::repl::run(&session, config.filters.as_ref()) {
                     eprintln!("REPL Error: {}", e);
                     std::process::exit(1);
                 }
@@ -311,7 +323,12 @@ async fn main() -> Result<()> {
             )
             .await
         }
-    }
+    };
+
+    // Shutdown tracing and flush pending spans
+    ansible_piloteer::tracing::shutdown_tracing();
+
+    result
 }
 
 async fn run_tui(
@@ -688,14 +705,63 @@ async fn run_app(
                     Some(msg) => {
                         match msg {
                             Message::Handshake { token: _ } => {
-                                app.client_connected = true; // [NEW]
+                                app.client_connected = true;
                                 app.log("Connected".to_string(), Some(ratatui::style::Color::Cyan));
                                 if headless { println!("Headless: Ansible Connected"); }
+
+                                // Create root playbook span
+                                let playbook_span = ansible_piloteer::tracing::create_root_span(
+                                    "playbook.execution",
+                                    vec![
+                                        opentelemetry::KeyValue::new("service.name", "ansible-piloteer"),
+                                        opentelemetry::KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                                    ],
+                                );
+
+                                // Attach span to context and store guard
+                                let guard = ansible_piloteer::tracing::attach_span(playbook_span);
+                                app.playbook_span_guard = Some(guard);
+
+                                if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
+                            }
+                            Message::PlayStart { name, host_pattern } => {
+                                app.log(format!("Play Started: {} (Hosts: {})", name, host_pattern), Some(ratatui::style::Color::Cyan));
+
+                                // End previous play span if any
+                                app.play_span_guard = None;
+                                app.play_span = None;
+
+                                // Create Play Span
+                                let play_span = ansible_piloteer::tracing::create_child_span(
+                                    format!("play: {}", name),
+                                    vec![
+                                        opentelemetry::KeyValue::new("play.name", name.clone()),
+                                        opentelemetry::KeyValue::new("play.hosts", host_pattern.clone()),
+                                    ],
+                                );
+
+                                // Attach span
+                                let guard = ansible_piloteer::tracing::attach_span(play_span);
+                                app.play_span_guard = Some(guard);
+
                                 if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
                             }
                             Message::TaskStart { name, task_vars, facts } => {
                                 app.log(format!("Task: {}", name), Some(ratatui::style::Color::White));
+                                app.task_start_time = Some(Instant::now()); // [NEW] Phase 22
                                 app.set_task(name.clone(), task_vars.clone(), facts.clone());
+
+                                // Create task span as child of current context (should be play span)
+                                let task_span = ansible_piloteer::tracing::create_child_span(
+                                    format!("task: {}", name),
+                                    vec![
+                                        opentelemetry::KeyValue::new("task.name", name.clone()),
+                                    ],
+                                );
+
+                                // Store span for later updates
+                                app.task_spans.insert(name.clone(), task_span);
+
                                 if headless {
                                     println!("Headless: Task Captured: {}", name);
                                     // Auto-proceed for testing
@@ -709,6 +775,15 @@ async fn run_app(
                             }
                             Message::TaskFail { name, result: _, facts } => {
                                 app.log(format!("Task Failed: {}", name), Some(ratatui::style::Color::Red));
+
+                                // Update task span with failure information
+                                if let Some(span) = app.task_spans.get_mut(&name) {
+                                    ansible_piloteer::tracing::record_error_on_span(span, &format!("Task '{}' failed", name));
+                                    ansible_piloteer::tracing::add_span_attributes(span, vec![
+                                        opentelemetry::KeyValue::new("task.failed", true),
+                                    ]);
+                                }
+
                                 if headless {
                                     println!("Headless: Task Failed: {}", name);
                                     if let Some(client) = &app.ai_client {
@@ -752,11 +827,24 @@ async fn run_app(
                                                      else if changed { ("CHANGED", ratatui::style::Color::Yellow) }
                                                      else { ("OK", ratatui::style::Color::Green) };
                                 app.log(format!("Task '{}' on {}: {}", name, host, status), Some(color));
+
+                                // End task span with final attributes
+                                if let Some(span) = app.task_spans.remove(&name) {
+                                    ansible_piloteer::tracing::end_span(span, vec![
+                                        opentelemetry::KeyValue::new("task.host", host.clone()),
+                                        opentelemetry::KeyValue::new("task.changed", changed),
+                                        opentelemetry::KeyValue::new("task.failed", failed),
+                                        opentelemetry::KeyValue::new("task.status", status),
+                                    ]);
+                                }
+
+                                let duration = app.task_start_time.map(|start| start.elapsed().as_secs_f64()).unwrap_or(0.0); // [NEW] Phase 22
                                 app.record_task_result(
                                     name.clone(),
                                     host,
                                     changed,
                                     failed,
+                                    duration, // [NEW]
                                     None,
                                     verbose_result.clone(),
                                     None, // [NEW] analysis
@@ -782,20 +870,28 @@ async fn run_app(
                             Message::PlayRecap { stats } => {
                                 app.log(format!("Play Recap Received: {:?}", stats), Some(ratatui::style::Color::Cyan));
 
-                                // Add to history so it can be inspected in Analysis Mode
+                                // End Play Span
+                                app.play_span_guard = None;
+                                app.play_span = None;
+
                                 // Add to history so it can be inspected in Analysis Mode
                                 app.record_task_result(
                                     "Play Recap".to_string(),
                                     "all".to_string(),
                                     false,
                                     false,
+                                    0.0, // [NEW] Duration
                                     None,
                                     Some(ansible_piloteer::execution::ExecutionDetails::new(stats.clone())),
                                     None, // [NEW] analysis
+
                                 );
 
-                                app.play_recap = Some(stats);
+                                app.play_recap = Some(stats.clone());
                                 app.set_task("Playbook Complete".to_string(), serde_json::Value::Null, None);
+
+                                // Close playbook span by dropping the guard
+                                app.playbook_span_guard = None;
                             }
                             Message::AiAnalysis { task, analysis } => {
                                 app.asking_ai = false;
@@ -970,6 +1066,17 @@ async fn run_app(
                                 }
                            }
                        }
+                       Action::ToggleMetrics => {
+                           app.show_metrics = !app.show_metrics;
+                       }
+                       Action::ToggleMetricsView => {
+                           // Toggle between Dashboard and Heatmap
+                           app.metrics_view = match app.metrics_view {
+                               ansible_piloteer::app::MetricsView::Dashboard => ansible_piloteer::app::MetricsView::Heatmap,
+                               ansible_piloteer::app::MetricsView::Heatmap => ansible_piloteer::app::MetricsView::Dashboard,
+                           };
+                       }
+                       Action::None => {}
                        Action::Yank => {
                             if app.show_analysis {
                                 if app.analysis_focus == app::AnalysisFocus::DataBrowser

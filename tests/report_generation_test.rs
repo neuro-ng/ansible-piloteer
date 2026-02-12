@@ -20,6 +20,7 @@ fn create_test_config() -> Config {
         zipkin_endpoint: None,
         zipkin_service_name: "ansible-piloteer".to_string(),
         zipkin_sample_rate: 1.0,
+        filters: None,
     })
 }
 
@@ -42,6 +43,7 @@ fn test_report_with_unreachable_hosts() {
         host: "working_host".to_string(),
         changed: false,
         failed: false,
+            duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
@@ -72,6 +74,7 @@ fn test_report_with_ai_analysis() {
         host: "test_host".to_string(),
         changed: false,
         failed: true,
+            duration: 0.0,
         error: Some("Module failed".to_string()),
         verbose_result: None,
         analysis: Some(Analysis {
@@ -106,6 +109,7 @@ fn test_report_with_mixed_results() {
         host: "host1".to_string(),
         changed: false,
         failed: false,
+            duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
@@ -117,6 +121,7 @@ fn test_report_with_mixed_results() {
         host: "host2".to_string(),
         changed: true,
         failed: false,
+            duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
@@ -128,6 +133,7 @@ fn test_report_with_mixed_results() {
         host: "host3".to_string(),
         changed: false,
         failed: true,
+            duration: 0.0,
         error: Some("Task error".to_string()),
         verbose_result: None,
         analysis: None,
@@ -169,6 +175,7 @@ fn test_report_structure() {
         host: "localhost".to_string(),
         changed: true,
         failed: false,
+            duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
@@ -209,6 +216,7 @@ fn test_report_with_multiple_analyses() {
         host: "host1".to_string(),
         changed: false,
         failed: true,
+            duration: 0.0,
         error: Some("Error 1".to_string()),
         verbose_result: None,
         analysis: Some(Analysis {
@@ -226,6 +234,7 @@ fn test_report_with_multiple_analyses() {
         host: "host2".to_string(),
         changed: false,
         failed: true,
+            duration: 0.0,
         error: Some("Error 2".to_string()),
         verbose_result: None,
         analysis: Some(Analysis {

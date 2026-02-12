@@ -2,6 +2,27 @@ use ansible_piloteer::app::{App, TaskHistory};
 use ansible_piloteer::config::Config;
 use ansible_piloteer::ipc::Message;
 
+fn create_test_config() -> Config {
+    Config::new().unwrap_or_else(|_| Config {
+        openai_api_key: None,
+        socket_path: "/tmp/test.sock".to_string(),
+        model: "gpt-4".to_string(),
+        api_base: "https://api.openai.com/v1".to_string(),
+        log_level: "info".to_string(),
+        auth_token: None,
+        bind_addr: None,
+        secret_token: None,
+        quota_limit_tokens: None,
+        quota_limit_usd: None,
+        google_client_id: None,
+        google_client_secret: None,
+        zipkin_endpoint: None,
+        zipkin_service_name: "ansible-piloteer".to_string(),
+        zipkin_sample_rate: 1.0,
+        filters: None,
+    })
+}
+
 #[test]
 fn test_unreachable_message_parsing() {
     let json = r#"{"TaskUnreachable":{"name":"test_task","host":"host1","error":"Connection refused","result":{}}}"#;
@@ -47,23 +68,7 @@ fn test_unreachable_message_with_details() {
 
 #[test]
 fn test_unreachable_app_state_tracking() {
-    let config = Config::new().unwrap_or_else(|_| Config {
-        openai_api_key: None,
-        socket_path: "/tmp/test.sock".to_string(),
-        model: "gpt-4".to_string(),
-        api_base: "https://api.openai.com/v1".to_string(),
-        log_level: "info".to_string(),
-        auth_token: None,
-        bind_addr: None,
-        secret_token: None,
-        quota_limit_tokens: None,
-        quota_limit_usd: None,
-        google_client_id: None,
-        google_client_secret: None,
-        zipkin_endpoint: None,
-        zipkin_service_name: "ansible-piloteer".to_string(),
-        zipkin_sample_rate: 1.0,
-    });
+    let config = create_test_config();
 
     let mut app = App::new(config);
 
@@ -93,23 +98,7 @@ fn test_unreachable_app_state_tracking() {
 
 #[test]
 fn test_multiple_unreachable_hosts() {
-    let config = Config::new().unwrap_or_else(|_| Config {
-        openai_api_key: None,
-        socket_path: "/tmp/test.sock".to_string(),
-        model: "gpt-4".to_string(),
-        api_base: "https://api.openai.com/v1".to_string(),
-        log_level: "info".to_string(),
-        auth_token: None,
-        bind_addr: None,
-        secret_token: None,
-        quota_limit_tokens: None,
-        quota_limit_usd: None,
-        google_client_id: None,
-        google_client_secret: None,
-        zipkin_endpoint: None,
-        zipkin_service_name: "ansible-piloteer".to_string(),
-        zipkin_sample_rate: 1.0,
-    });
+    let config = create_test_config();
 
     let mut app = App::new(config);
 
@@ -147,23 +136,7 @@ fn test_multiple_unreachable_hosts() {
 
 #[test]
 fn test_unreachable_session_persistence() {
-    let config = Config::new().unwrap_or_else(|_| Config {
-        openai_api_key: None,
-        socket_path: "/tmp/test.sock".to_string(),
-        model: "gpt-4".to_string(),
-        api_base: "https://api.openai.com/v1".to_string(),
-        log_level: "info".to_string(),
-        auth_token: None,
-        bind_addr: None,
-        secret_token: None,
-        quota_limit_tokens: None,
-        quota_limit_usd: None,
-        google_client_id: None,
-        google_client_secret: None,
-        zipkin_endpoint: None,
-        zipkin_service_name: "ansible-piloteer".to_string(),
-        zipkin_sample_rate: 1.0,
-    });
+    let config = create_test_config();
 
     let mut app = App::new(config);
 
@@ -224,23 +197,7 @@ fn test_unreachable_session_persistence() {
 
 #[test]
 fn test_unreachable_with_normal_tasks() {
-    let config = Config::new().unwrap_or_else(|_| Config {
-        openai_api_key: None,
-        socket_path: "/tmp/test.sock".to_string(),
-        model: "gpt-4".to_string(),
-        api_base: "https://api.openai.com/v1".to_string(),
-        log_level: "info".to_string(),
-        auth_token: None,
-        bind_addr: None,
-        secret_token: None,
-        quota_limit_tokens: None,
-        quota_limit_usd: None,
-        google_client_id: None,
-        google_client_secret: None,
-        zipkin_endpoint: None,
-        zipkin_service_name: "ansible-piloteer".to_string(),
-        zipkin_sample_rate: 1.0,
-    });
+    let config = create_test_config();
 
     let mut app = App::new(config);
 
@@ -250,6 +207,7 @@ fn test_unreachable_with_normal_tasks() {
         host: "host1".to_string(),
         changed: false,
         failed: false,
+            duration: 0.0,
         error: None,
         verbose_result: None,
         analysis: None,
@@ -269,6 +227,7 @@ fn test_unreachable_with_normal_tasks() {
         host: "host3".to_string(),
         changed: false,
         failed: true,
+            duration: 0.0,
         error: Some("Task error".to_string()),
         verbose_result: None,
         analysis: None,

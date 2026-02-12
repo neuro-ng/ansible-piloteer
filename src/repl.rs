@@ -3,7 +3,12 @@ use jmespath::Runtime;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-pub fn run(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
+use std::collections::HashMap;
+
+pub fn run(
+    session: &Session,
+    filters: Option<&HashMap<String, String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut rl = DefaultEditor::new()?;
     // Optional: Load history
     // if rl.load_history("history.txt").is_err() {
@@ -13,13 +18,18 @@ pub fn run(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = Runtime::new();
     runtime.register_builtin_functions();
     // Register custom functions
-    runtime.register_function("group_by", Box::new(crate::query::GroupBy::new()));
-    runtime.register_function("unique", Box::new(crate::query::Unique::new()));
-    runtime.register_function("count", Box::new(crate::query::Count::new()));
-    runtime.register_function("sum", Box::new(crate::query::Sum::new()));
-    runtime.register_function("avg", Box::new(crate::query::Avg::new()));
-    runtime.register_function("min", Box::new(crate::query::Min::new()));
-    runtime.register_function("max", Box::new(crate::query::Max::new()));
+    crate::query::register_functions(&mut runtime);
+
+    // Register user-defined filters
+    if let Some(user_filters) = filters {
+        for (name, expr) in user_filters {
+            println!("Registering custom filter: {}", name);
+            runtime.register_function(
+                name,
+                Box::new(crate::query::CustomFilter::new(expr.clone())),
+            );
+        }
+    }
 
     // Serialize session once for querying
     // Note: This might be expensive for large sessions, but necessary for JMESPath

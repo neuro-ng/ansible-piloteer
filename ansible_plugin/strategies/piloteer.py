@@ -75,6 +75,20 @@ class StrategyModule(LinearStrategyModule):
 
     def run(self, iterator, play_context):
         self.play_context = play_context
+
+        # Send Play Start
+        play_name = iterator._play.get_name()
+        # iterator._play.hosts could be a list or string, safer to str()
+        host_pattern = str(iterator._play.hosts)
+        
+        print(f"DEBUG: Sending PlayStart: {play_name}", flush=True)
+        self._send({
+            "PlayStart": {
+                "name": play_name,
+                "host_pattern": host_pattern
+            }
+        })
+
         result = super(StrategyModule, self).run(iterator, play_context)
         print("DEBUG: Run finished, checking stats", flush=True)
         
