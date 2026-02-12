@@ -367,6 +367,13 @@ impl Replace {
         Self
     }
 }
+
+impl Default for Replace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Function for Replace {
     fn evaluate(&self, args: &[Rcvar], _ctx: &mut Context<'_>) -> Result<Rcvar, JmespathError> {
         if args.len() != 3 {
@@ -411,6 +418,13 @@ impl Split {
         Self
     }
 }
+
+impl Default for Split {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Function for Split {
     fn evaluate(&self, args: &[Rcvar], _ctx: &mut Context<'_>) -> Result<Rcvar, JmespathError> {
         if args.len() != 2 {
@@ -449,6 +463,13 @@ impl Matches {
         Self
     }
 }
+
+impl Default for Matches {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Function for Matches {
     fn evaluate(&self, args: &[Rcvar], _ctx: &mut Context<'_>) -> Result<Rcvar, JmespathError> {
         if args.len() != 2 {

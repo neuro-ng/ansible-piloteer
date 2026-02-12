@@ -160,7 +160,7 @@ impl MetricsDashboard {
         ];
         let sparkline = Sparkline::default()
             .block(Block::default())
-            .data(&data)
+            .data(data)
             .style(Style::default().fg(Color::Magenta));
 
         frame.render_widget(sparkline, inner_area);
