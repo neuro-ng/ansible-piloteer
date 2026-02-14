@@ -1,0 +1,9 @@
+---
+- name: Verification Play
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Debug Variable
+      debug:
+        msg: "Verification Result: {{ verification_var | default('FAILED') }}"

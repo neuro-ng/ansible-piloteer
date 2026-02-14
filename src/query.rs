@@ -507,3 +507,53 @@ impl Function for Matches {
         Ok(Rc::new(Variable::Bool(re.is_match(input))))
     }
 }
+
+pub fn run_query(query: &str, data: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut runtime = Runtime::new();
+    runtime.register_builtin_functions();
+    register_functions(&mut runtime);
+
+    let expr = runtime.compile(query).map_err(|e| e.to_string())?;
+
+    // JMESPath variable from JSON Value
+    let json_str = data.to_string();
+    let variable = Variable::from_json(&json_str).map_err(|e| e.to_string())?;
+
+    let result = expr.search(variable).map_err(|e| e.to_string())?;
+
+    // Check if result is null (often means query didn't match anything)
+    if result.is_null() {
+        return Ok(serde_json::Value::Null);
+    }
+
+    serde_json::to_value(&*result).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_run_query_simple() {
+        let data = json!({
+            "foo": "bar",
+            "baz": [1, 2, 3]
+        });
+        let result = run_query("foo", &data).unwrap();
+        assert_eq!(result, json!("bar"));
+    }
+
+    #[test]
+    fn test_run_query_complex() {
+        let data = json!({
+            "hosts": [
+                {"name": "h1", "status": "ok"},
+                {"name": "h2", "status": "failed"}
+            ]
+        });
+        // Test filtering
+        let result = run_query("hosts[?status == 'failed'].name", &data).unwrap();
+        assert_eq!(result, json!(["h2"]));
+    }
+}

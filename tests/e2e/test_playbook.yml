@@ -1,0 +1,23 @@
+---
+- name: E2E Connectivity Test
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Ping
+      ping:
+
+    - name: Gather Facts
+      setup:
+
+    - name: Print OS Family
+      debug:
+        msg: "Host {{ inventory_hostname }} is running {{ ansible_os_family }}"
+
+    - name: Verify Sudo Access
+      command: id
+      become: yes
+      register: sudo_result
+
+    - name: Print Sudo Result
+      debug:
+        msg: "Sudo user ID: {{ sudo_result.stdout }}"

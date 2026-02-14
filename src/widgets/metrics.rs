@@ -146,21 +146,23 @@ impl MetricsDashboard {
         frame.render_widget(barchart, inner_area);
     }
 
-    fn draw_event_velocity(frame: &mut Frame, _app: &App, area: Rect) {
+    fn draw_event_velocity(frame: &mut Frame, app: &App, area: Rect) {
         let block = Block::default()
-            .title("Event Velocity (Simulated)")
+            .title("Event Velocity")
             .borders(Borders::ALL);
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        // Placeholder Sparkline
-        // We don't track events/sec yet in App, so let's use a dummy or skip
-        let data = [
-            0, 2, 5, 8, 2, 1, 0, 5, 10, 15, 20, 15, 10, 5, 0, 2, 8, 12, 16, 20,
-        ];
+        // Real Data from App
+        let history: Vec<u64> = app.event_velocity.iter().cloned().collect();
+        // Append current counter for live view?
+        // Sparkline shows history. The current second is still accumulating in event_counter.
+        // We could append it, but typically Sparkline shows completed intervals.
+        // Let's just show history.
+
         let sparkline = Sparkline::default()
             .block(Block::default())
-            .data(data)
+            .data(&history)
             .style(Style::default().fg(Color::Magenta));
 
         frame.render_widget(sparkline, inner_area);

@@ -1,0 +1,38 @@
+FROM nixos/nix:latest
+
+# NixOS/Nix image is minimal and doesn't run systemd, so standard nixos-rebuild doesn't work easily in docker.
+# We will use the nix package manager to install python3 and openssh, then run sshd manually.
+# Note: This is an approximation of a NixOS target.
+
+RUN nix-env -iA nixpkgs.openssh nixpkgs.python3 nixpkgs.gnused
+
+# Configure SSH
+RUN mkdir -p /etc/ssh /var/run/sshd
+RUN ssh-keygen -A
+# Fix for chpasswd: use python to update shadow directly
+# Configure SSH keys for pilot user (root login is finicky in this image)
+RUN mkdir -p /home/pilot/.ssh
+COPY id_nixos_e2e.pub /home/pilot/.ssh/authorized_keys
+RUN echo "pilot:x:1000:1000:Pilot User:/home/pilot:/bin/sh" >> /etc/passwd
+RUN echo "pilot:x:1000:" >> /etc/group
+RUN echo "/bin/sh" > /etc/shells
+RUN chown -R 1000:1000 /home/pilot && chmod 700 /home/pilot && chmod 700 /home/pilot/.ssh && chmod 600 /home/pilot/.ssh/authorized_keys
+
+# Configure SSHD explicitly (avoid PAM issues in minimal container)
+RUN echo "Port 22" > /etc/ssh/sshd_config && \
+    echo "LogLevel DEBUG3" >> /etc/ssh/sshd_config && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "UsePAM no" >> /etc/ssh/sshd_config
+
+# Create sshd user and directory manually (useradd from shadow package fails in minimal nix image)
+RUN mkdir -p /var/empty
+RUN echo "sshd:x:74:74:Privilege-separated SSH:/var/empty:/run/current-system/sw/bin/nologin" >> /etc/passwd
+RUN echo "sshd:x:74:" >> /etc/group
+
+# Expose SSH
+EXPOSE 22
+# Start SSHD. Note: nix-env links binaries to ~/.nix-profile/bin
+CMD ["/root/.nix-profile/bin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_config"]

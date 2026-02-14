@@ -1,0 +1,15 @@
+[
+    {
+        "task_name": "Fail intentionally",
+        "on_failure": true,
+        "actions": [
+            "AskAi",
+            {
+                "AssertAiContext": {
+                    "contains": "Real AI Client Analysis"
+                }
+            },
+            "Continue"
+        ]
+    }
+]

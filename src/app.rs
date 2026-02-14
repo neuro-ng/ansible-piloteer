@@ -11,10 +11,11 @@ pub enum Action {
     AskAi,
     ApplyFix,
     Continue,
-    Search,       // [NEW]
-    SubmitSearch, // [NEW]
-    NextMatch,    // [NEW]
-    PrevMatch,    // [NEW]
+    Search,
+    SubmitSearch,
+    SubmitQuery(String), // [NEW] Return query string to main loop for execution
+    NextMatch,           // [NEW]
+    PrevMatch,           // [NEW]
     ToggleFollow,
     ToggleFilter,   // [NEW]
     ToggleAnalysis, // [NEW] - Enter/Exit Data Browser
@@ -27,6 +28,7 @@ pub enum Action {
     ExportReport,      // [NEW]
     ToggleMetrics,     // [NEW] Phase 22
     ToggleMetricsView, // [NEW] Phase 22
+    ToggleBreakpoint,  // [NEW] Phase 31
     None,
 }
 
@@ -35,11 +37,64 @@ pub enum LogFilter {
     All,
     Failed,
     Changed,
-} // [NEW]
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditState {
+    Idle,
+    SelectingVariable {
+        filter: String,
+        selected_index: usize,
+    },
+    EditingValue {
+        key: String,
+        temp_file: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub enum ScriptActionType {
+    Pause,
+    Continue,
+    Resume, // [NEW] Phase 28
+    Retry,
+    EditVar {
+        key: String,
+        value: serde_json::Value,
+    },
+    ExecuteCommand {
+        cmd: String,
+    }, // [NEW] Phase 27
+    AssertAiContext {
+        contains: Option<String>,
+    }, // [NEW] Phase 28
+    AskAi,
+    ApplyFix,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ScriptAction {
+    pub task_name: String,
+    pub on_failure: bool,
+    pub actions: Vec<ScriptActionType>,
+}
 
 use crate::ai::{AiClient, Analysis};
 use crate::clipboard::ClipboardHandler;
-use crate::highlight::SyntaxHighlighter; // [NEW] // [MODIFY] // [NEW]
+use crate::highlight::SyntaxHighlighter;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ActiveView {
+    Dashboard,
+    Analysis,
+    Metrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DashboardFocus {
+    Logs,
+    Inspector,
+} // [NEW] Phase 27
 
 pub struct App {
     pub running: bool,
@@ -66,7 +121,9 @@ pub struct App {
     pub log_filter: LogFilter, // [NEW]
     pub play_recap: Option<serde_json::Value>,
     // Analysis Mode State
-    pub show_analysis: bool,
+    pub active_view: ActiveView,
+    pub dashboard_focus: DashboardFocus, // [NEW] Phase 27
+    // show_analysis replaced by active_view == Analysis
     pub analysis_index: usize,
     pub analysis_focus: AnalysisFocus, // [NEW]
     pub analysis_tree: Option<crate::widgets::json_tree::JsonTreeState>,
@@ -80,8 +137,9 @@ pub struct App {
     pub hosts: std::collections::HashMap<String, HostStatus>,
     pub host_list_index: usize,
     pub show_detail_view: bool,
-    pub show_metrics: bool,        // [NEW] Phase 22
-    pub metrics_view: MetricsView, // [NEW] Phase 22
+    // show_metrics replaced by active_view == Metrics
+    pub metrics_view: MetricsView,      // [NEW] Phase 22
+    pub test_script: Vec<ScriptAction>, // [NEW] Phase 27
     // Communication
     pub ipc_tx: Option<mpsc::Sender<Message>>,
     pub client_connected: bool, // [NEW] Track active client connection
@@ -97,6 +155,12 @@ pub struct App {
     pub task_spans: std::collections::HashMap<String, opentelemetry::global::BoxedSpan>,
     pub play_span: Option<opentelemetry::global::BoxedSpan>,
     pub play_span_guard: Option<opentelemetry::ContextGuard>,
+    // Event Velocity
+    pub event_velocity: VecDeque<u64>,
+    pub event_counter: u64,
+    pub last_velocity_update: std::time::Instant,
+    pub breakpoints: std::collections::HashSet<String>, // [NEW] Phase 31
+    pub edit_state: EditState,                          // [NEW] Phase 31
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -171,7 +235,8 @@ impl App {
             auto_scroll: true,
             log_filter: LogFilter::All,
             play_recap: None,
-            show_analysis: false,
+            active_view: ActiveView::Dashboard,
+            dashboard_focus: DashboardFocus::Logs, // [NEW]
             analysis_index: 0,
             analysis_focus: AnalysisFocus::TaskList, // [NEW]
             analysis_tree: None,
@@ -185,8 +250,8 @@ impl App {
             hosts: std::collections::HashMap::new(),
             host_list_index: 0,
             show_detail_view: false,
-            show_metrics: false,                  // [NEW] Phase 22
             metrics_view: MetricsView::Dashboard, // [NEW] Phase 22
+            test_script: Vec::new(),              // [NEW] Phase 27
             unreachable_hosts: std::collections::HashSet::new(),
             // Visual Mode State
             visual_mode: false,
@@ -199,6 +264,60 @@ impl App {
             task_spans: std::collections::HashMap::new(),
             play_span: None,
             play_span_guard: None,
+            // Event Velocity
+            event_velocity: VecDeque::new(),
+            event_counter: 0,
+            last_velocity_update: std::time::Instant::now(),
+            breakpoints: std::collections::HashSet::new(),
+            edit_state: EditState::Idle,
+        }
+    }
+
+    pub fn get_flattened_vars(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        if let Some(vars) = &self.task_vars
+            && let Some(obj) = vars.as_object()
+        {
+            for (k, _) in obj {
+                keys.push(k.clone());
+            }
+        }
+        if let Some(facts) = &self.facts
+            && let Some(obj) = facts.as_object()
+        {
+            for (k, _) in obj {
+                keys.push(format!("ansible_facts.{}", k));
+            }
+        }
+        keys.sort();
+        keys
+    }
+
+    pub fn get_var_value(&self, key: &str) -> Option<serde_json::Value> {
+        if key.starts_with("ansible_facts.") {
+            let fact_key = key.trim_start_matches("ansible_facts.");
+            self.facts.as_ref().and_then(|f| f.get(fact_key).cloned())
+        } else {
+            self.task_vars.as_ref().and_then(|v| v.get(key).cloned())
+        }
+    }
+
+    pub fn load_test_script(&mut self) {
+        if let Ok(path) = std::env::var("PILOTEER_TEST_SCRIPT") {
+            // println!("Headless: Loading test script from: {}", path);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                match serde_json::from_str::<Vec<ScriptAction>>(&content) {
+                    Ok(actions) => {
+                        self.test_script = actions;
+                        // println!("Headless: Loaded {} script actions", self.test_script.len());
+                    }
+                    Err(e) => {
+                        eprintln!("Headless Error: Failed to parse test script: {}", e);
+                    }
+                }
+            } else {
+                eprintln!("Headless Error: Failed to read test script file: {}", path);
+            }
         }
     }
 
@@ -220,6 +339,81 @@ impl App {
                     return Action::None;
                 }
 
+                // [NEW] Variable Selection Logic
+                // We need to handle this carefully to avoid double borrow of self
+                let mut selection_action = Action::None;
+
+                if let EditState::SelectingVariable {
+                    filter,
+                    selected_index,
+                } = &mut self.edit_state
+                {
+                    match key.code {
+                        KeyCode::Esc => {
+                            // We will handle state change after the block
+                            selection_action = Action::None; // Just marker
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            *selected_index = selected_index.saturating_add(1);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            *selected_index = selected_index.saturating_sub(1);
+                        }
+                        KeyCode::Char(c) => {
+                            filter.push(c);
+                            *selected_index = 0;
+                        }
+                        KeyCode::Backspace => {
+                            filter.pop();
+                            *selected_index = 0;
+                        }
+                        KeyCode::Enter => {
+                            selection_action = Action::EditVar;
+                        }
+                        _ => {}
+                    }
+
+                    if key.code == KeyCode::Esc {
+                        self.edit_state = EditState::Idle;
+                        return Action::None;
+                    }
+                }
+
+                // Handle the action triggered by Enter
+                if let Action::EditVar = selection_action {
+                    // Now we are out of the borrow, we can use self methods
+                    if let EditState::SelectingVariable {
+                        filter,
+                        selected_index,
+                    } = &self.edit_state
+                    {
+                        let all_vars = self.get_flattened_vars();
+                        let filtered: Vec<&String> = all_vars
+                            .iter()
+                            .filter(|v| v.to_lowercase().contains(&filter.to_lowercase()))
+                            .collect();
+
+                        if let Some(selected_key) =
+                            filtered.get(*selected_index % filtered.len().max(1))
+                        {
+                            let key_clone = selected_key.to_string();
+                            if let Err(e) = self.prepare_edit(key_clone) {
+                                self.notification =
+                                    Some((format!("Error: {}", e), std::time::Instant::now()));
+                                self.edit_state = EditState::Idle;
+                                return Action::None;
+                            }
+                            return Action::EditVar;
+                        }
+                    }
+                    return Action::None;
+                }
+
+                // If we are selecting, we consumed the key
+                if matches!(self.edit_state, EditState::SelectingVariable { .. }) {
+                    return Action::None;
+                }
+
                 // If search is active, handle input
                 if self.search_active {
                     match key.code {
@@ -230,13 +424,23 @@ impl App {
                         }
                         KeyCode::Enter => {
                             self.search_active = false;
+
+                            // Check for query prefix
+                            let query = self.search_query.trim();
+                            if query.starts_with("::query::") {
+                                let query_str =
+                                    query.trim_start_matches("::query::").trim().to_string();
+                                if !query_str.is_empty() {
+                                    return Action::SubmitQuery(query_str);
+                                }
+                                return Action::None;
+                            }
+
                             // Trigger search
-                            if self.show_analysis {
+                            if self.active_view == ActiveView::Analysis {
                                 if let Some(tree) = &mut self.analysis_tree {
                                     tree.set_search(self.search_query.clone());
                                 }
-                            } else {
-                                self.find_next_match();
                             }
                             return Action::SubmitSearch;
                         }
@@ -297,7 +501,7 @@ impl App {
                                 if let Some(host) = sorted_hosts.get(self.host_list_index) {
                                     if let Some(facts) = self.host_facts.get(host) {
                                         // Load facts into Data Browser
-                                        self.show_analysis = true;
+                                        self.active_view = ActiveView::Analysis;
                                         self.analysis_focus = AnalysisFocus::DataBrowser;
                                         self.analysis_tree =
                                             Some(crate::widgets::json_tree::JsonTreeState::new(
@@ -313,21 +517,42 @@ impl App {
                     }
                 }
 
+                // Global Navigation (Tab Cycling)
+                if key.code == KeyCode::Tab {
+                    self.active_view = match self.active_view {
+                        ActiveView::Dashboard => ActiveView::Analysis,
+                        ActiveView::Analysis => ActiveView::Metrics,
+                        ActiveView::Metrics => ActiveView::Dashboard,
+                    };
+                    return Action::None;
+                }
+                if key.code == KeyCode::BackTab {
+                    self.active_view = match self.active_view {
+                        ActiveView::Dashboard => ActiveView::Metrics,
+                        ActiveView::Analysis => ActiveView::Dashboard,
+                        ActiveView::Metrics => ActiveView::Analysis,
+                    };
+                    return Action::None;
+                }
+
                 // Analysis Mode Navigation
-                if self.show_analysis {
+                if self.active_view == ActiveView::Analysis {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => {
-                            return Action::ToggleAnalysis;
+                            // Exit Analysis
+                            self.active_view = ActiveView::Dashboard;
+                            return Action::None;
+                            // return Action::ToggleAnalysis; // Removed Action
                         }
                         // Switch Focus
-                        KeyCode::Tab => {
-                            self.analysis_focus = match self.analysis_focus {
-                                AnalysisFocus::TaskList => AnalysisFocus::DataBrowser,
-                                AnalysisFocus::DataBrowser => AnalysisFocus::TaskList,
-                            };
-                            return Action::None;
-                        }
-                        // Allow Arrow Keys for Focus Switching
+                        // NOTE: Tab is now Global for View Switching.
+                        // We use Shift+Tab or another key for cycling focus inside Analysis?
+                        // OR: We check for Tab, if we are in Analysis, we MIGHT cycle focus IF user wants that behavior.
+                        // BUT Requirement says "Tab to switch main views".
+                        // So we should remove Tab from Analysis focus switching OR use something else.
+                        // Let's use 'w' or just arrows/Shift+Arrows.
+                        // Wait, 'w' is wrap.
+                        // Let's use 'o' or just keep Shift+Arrows.
                         KeyCode::Right
                             if matches!(self.analysis_focus, AnalysisFocus::TaskList) =>
                         {
@@ -357,14 +582,14 @@ impl App {
                 }
 
                 // Analysis Mode Actions
-                if self.show_analysis {
+                if self.active_view == ActiveView::Analysis {
                     match key.code {
                         KeyCode::Esc => {
                             if self.show_detail_view {
                                 self.show_detail_view = false;
                                 return Action::None;
                             }
-                            self.show_analysis = false;
+                            self.active_view = ActiveView::Dashboard;
                             self.analysis_focus = AnalysisFocus::TaskList;
                             return Action::None;
                         }
@@ -378,8 +603,8 @@ impl App {
                                 return Action::Yank;
                             }
                         }
-                        KeyCode::Char('v') => {
-                            // Toggle visual mode
+                        KeyCode::Char('V') => {
+                            // Toggle visual mode (Shift+v)
                             if self.visual_mode {
                                 self.visual_mode = false;
                                 self.visual_start_index = None;
@@ -402,6 +627,7 @@ impl App {
                             AnalysisFocus::TaskList => match key.code {
                                 KeyCode::Up | KeyCode::Char('k') => return Action::AnalysisPrev,
                                 KeyCode::Down | KeyCode::Char('j') => return Action::AnalysisNext,
+                                KeyCode::Char('b') => return Action::ToggleBreakpoint, // [NEW] Phase 31
                                 _ => {}
                             },
                             AnalysisFocus::DataBrowser => {
@@ -446,18 +672,7 @@ impl App {
                                             }
                                             return Action::None;
                                         }
-                                        KeyCode::Char('h') => {
-                                            if key
-                                                .modifiers
-                                                .contains(crossterm::event::KeyModifiers::SHIFT)
-                                            {
-                                                tree.collapse_current_recursive();
-                                            } else {
-                                                tree.collapse_or_parent();
-                                            }
-                                            return Action::None;
-                                        }
-                                        KeyCode::Char('l') => {
+                                        KeyCode::Char('l') | KeyCode::Right => {
                                             if key
                                                 .modifiers
                                                 .contains(crossterm::event::KeyModifiers::SHIFT)
@@ -472,6 +687,18 @@ impl App {
                                             tree.toggle_collapse();
                                             return Action::None;
                                         }
+                                        KeyCode::Left | KeyCode::Char('h') => {
+                                            if key
+                                                .modifiers
+                                                .contains(crossterm::event::KeyModifiers::SHIFT)
+                                            {
+                                                tree.collapse_current_recursive();
+                                            } else {
+                                                tree.collapse_or_parent();
+                                            }
+                                            return Action::None;
+                                        }
+
                                         KeyCode::Char('/') => {
                                             self.search_active = true;
                                             self.search_query.clear();
@@ -519,7 +746,14 @@ impl App {
                         }
                     }
                     KeyCode::Char('r') => return Action::Retry,
-                    KeyCode::Char('e') => return Action::EditVar,
+                    KeyCode::Char('e') => {
+                        // Enter selection mode
+                        self.edit_state = EditState::SelectingVariable {
+                            filter: String::new(),
+                            selected_index: 0,
+                        };
+                        return Action::None;
+                    }
                     KeyCode::Char('a') => return Action::AskAi,
                     KeyCode::Char('f') => return Action::ApplyFix,
                     KeyCode::Char('F') => return Action::ToggleFollow,
@@ -551,29 +785,95 @@ impl App {
                         self.find_prev_match();
                         return Action::PrevMatch;
                     }
+                    _ => {} // Default for this match block
+                }
 
-                    // Inspector Scroll
-                    KeyCode::Up => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                        return Action::None;
+                if self.active_view == ActiveView::Dashboard {
+                    // Dashboard Focus & Navigation
+                    match key.code {
+                        KeyCode::Right => {
+                            self.dashboard_focus = DashboardFocus::Inspector;
+                            return Action::None;
+                        }
+                        KeyCode::Left => {
+                            self.dashboard_focus = DashboardFocus::Logs;
+                            return Action::None;
+                        }
+                        // Up: Scroll Logs or Inspector
+                        KeyCode::Up => {
+                            match self.dashboard_focus {
+                                DashboardFocus::Logs => {
+                                    self.auto_scroll = false;
+                                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                                }
+                                DashboardFocus::Inspector => {
+                                    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                                }
+                            }
+                            return Action::None;
+                        }
+                        // Down: Scroll Logs or Inspector
+                        KeyCode::Down => {
+                            match self.dashboard_focus {
+                                DashboardFocus::Logs => {
+                                    self.log_scroll = self.log_scroll.saturating_add(1);
+                                }
+                                DashboardFocus::Inspector => {
+                                    self.scroll_offset = self.scroll_offset.saturating_add(1);
+                                }
+                            }
+                            return Action::None;
+                        }
+                        // Log Scroll (PageUp/PageDown) or Inspector (PageUp/PageDown)
+                        KeyCode::PageUp => {
+                            match self.dashboard_focus {
+                                DashboardFocus::Logs => {
+                                    self.auto_scroll = false;
+                                    self.log_scroll = self.log_scroll.saturating_sub(10);
+                                }
+                                DashboardFocus::Inspector => {
+                                    self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                                }
+                            }
+                            return Action::None;
+                        }
+                        KeyCode::PageDown => {
+                            match self.dashboard_focus {
+                                DashboardFocus::Logs => {
+                                    self.log_scroll = self.log_scroll.saturating_add(10);
+                                }
+                                DashboardFocus::Inspector => {
+                                    self.scroll_offset = self.scroll_offset.saturating_add(10);
+                                }
+                            }
+                            return Action::None;
+                        }
+                        _ => {}
                     }
-                    KeyCode::Down => {
-                        self.scroll_offset = self.scroll_offset.saturating_add(1);
-                        return Action::None;
-                    }
-                    // Log Scroll (PageUp/PageDown)
-                    KeyCode::PageUp => {
-                        self.auto_scroll = false;
-                        self.log_scroll = self.log_scroll.saturating_sub(10);
-                        return Action::None;
-                    }
-                    KeyCode::PageDown => {
-                        self.log_scroll = self.log_scroll.saturating_add(10);
-                        return Action::None;
-                    }
-                    KeyCode::Char('v') => return Action::ToggleAnalysis,
-                    KeyCode::Char('m') => return Action::ToggleMetrics, // [NEW] Phase 22
+                }
+
+                // Normal Mode Keys
+                match key.code {
+                    KeyCode::Char('a') => return Action::AskAi, // [FIX] AI Chat binding
                     KeyCode::Char('y') => return Action::Yank,
+
+                    // Specific View Toggles (Shortcuts)
+                    KeyCode::Char('v') => {
+                        self.active_view = if self.active_view == ActiveView::Analysis {
+                            ActiveView::Dashboard
+                        } else {
+                            ActiveView::Analysis
+                        };
+                        return Action::None;
+                    }
+                    KeyCode::Char('m') => {
+                        self.active_view = if self.active_view == ActiveView::Metrics {
+                            ActiveView::Dashboard
+                        } else {
+                            ActiveView::Metrics
+                        };
+                        return Action::None;
+                    }
 
                     _ => {}
                 }
@@ -595,6 +895,9 @@ impl App {
     pub fn log(&mut self, msg: String, color: Option<ratatui::style::Color>) {
         self.logs
             .push_back((msg, color.unwrap_or(ratatui::style::Color::White)));
+
+        self.event_counter += 1;
+
         if self.logs.len() > 1000 {
             self.logs.pop_front();
         }
@@ -602,7 +905,9 @@ impl App {
         // For now, keep scroll at 0 to show all logs from the top.
         // A proper implementation would calculate based on viewport height.
         if self.auto_scroll {
-            self.log_scroll = 0;
+            // FIX: Don't reset to 0. Set to length to ensure we scroll to bottom.
+            // Paragraph widget handles over-scrolling by showing the end.
+            self.log_scroll = self.logs.len() as u16;
         }
     }
 
@@ -615,6 +920,7 @@ impl App {
         self.current_task = Some(name);
         self.task_vars = Some(vars);
         self.facts = facts.clone();
+        self.task_start_time = Some(std::time::Instant::now());
 
         // Phase 18: Extract Host and Update State
         if let Some(f) = &facts
@@ -715,31 +1021,61 @@ impl App {
             return;
         }
 
-        let start_index = self.search_index.unwrap_or(0);
+        // If in Analysis mode - handled by tree (but search triggers SubmitSearch action which we might handle?)
+        // Currently search in Analysis is handled via `Action::SubmitSearch` -> `main.rs`?
+        // No, `handle_event` returns `SubmitSearch`, main loop ignores it?
+        // Wait, `handle_event` calls `tree.set_search`.
+        // So for Dashboard we need logic here.
 
-        // Search forward from start_index + 1
-        for (i, (msg, _)) in self.logs.iter().enumerate().skip(start_index + 1) {
-            if msg
-                .to_lowercase()
-                .contains(&self.search_query.to_lowercase())
-            {
-                self.search_index = Some(i);
-                self.log_scroll = i as u16;
-                self.auto_scroll = false;
-                return;
-            }
-        }
+        if self.active_view == ActiveView::Dashboard {
+            match self.dashboard_focus {
+                DashboardFocus::Logs => {
+                    let start_index = self.search_index.unwrap_or(0);
+                    // Search forward from start_index + 1
+                    for (i, (msg, _)) in self.logs.iter().enumerate().skip(start_index + 1) {
+                        if msg
+                            .to_lowercase()
+                            .contains(&self.search_query.to_lowercase())
+                        {
+                            self.search_index = Some(i);
+                            self.log_scroll = i as u16;
+                            self.auto_scroll = false;
+                            return;
+                        }
+                    }
+                    // Wrap around from 0
+                    for (i, (msg, _)) in self.logs.iter().enumerate().take(start_index + 1) {
+                        if msg
+                            .to_lowercase()
+                            .contains(&self.search_query.to_lowercase())
+                        {
+                            self.search_index = Some(i);
+                            self.log_scroll = i as u16;
+                            self.auto_scroll = false;
+                            return;
+                        }
+                    }
+                }
+                DashboardFocus::Inspector => {
+                    // Implement Inspector Search
+                    // We need the content.
+                    // For now, let's reconstruct it effectively.
+                    let content = if let Some(err) = &self.failed_result {
+                        serde_json::to_string_pretty(err).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
 
-        // Wrap around from 0
-        for (i, (msg, _)) in self.logs.iter().enumerate().take(start_index + 1) {
-            if msg
-                .to_lowercase()
-                .contains(&self.search_query.to_lowercase())
-            {
-                self.search_index = Some(i);
-                self.log_scroll = i as u16;
-                self.auto_scroll = false;
-                return;
+                    // Simple search: find byte offset match
+                    if let Some(idx) = content
+                        .to_lowercase()
+                        .find(&self.search_query.to_lowercase())
+                    {
+                        // Rough scrolling approximation: count newlines before match
+                        let lines_before = content[..idx].chars().filter(|&c| c == '\n').count();
+                        self.scroll_offset = lines_before as u16;
+                    }
+                }
             }
         }
     }
@@ -749,36 +1085,41 @@ impl App {
             return;
         }
 
-        let start_index = self.search_index.unwrap_or(self.logs.len());
-
-        // Search backwards from start_index - 1
-        if start_index > 0 {
-            for i in (0..start_index).rev() {
-                if let Some((msg, _)) = self.logs.get(i)
-                    && msg
-                        .to_lowercase()
-                        .contains(&self.search_query.to_lowercase())
-                {
-                    self.search_index = Some(i);
-                    // Ensure scroll follows
-                    // If we found a match, we probably want to scroll to it.
-                    // For simplicity, just set log_scroll to i (or close to it)
-                    self.log_scroll = if i > 5 { i as u16 - 5 } else { 0 };
-                    return;
+        if self.active_view == ActiveView::Dashboard {
+            match self.dashboard_focus {
+                DashboardFocus::Logs => {
+                    let start_index = self.search_index.unwrap_or(self.logs.len());
+                    // Search backwards from start_index - 1
+                    if start_index > 0 {
+                        for i in (0..start_index).rev() {
+                            if let Some((msg, _)) = self.logs.get(i)
+                                && msg
+                                    .to_lowercase()
+                                    .contains(&self.search_query.to_lowercase())
+                            {
+                                self.search_index = Some(i);
+                                self.log_scroll = if i > 5 { i as u16 - 5 } else { 0 };
+                                return;
+                            }
+                        }
+                    }
+                    // Wrap around to end
+                    for i in (start_index..self.logs.len()).rev() {
+                        if let Some((msg, _)) = self.logs.get(i)
+                            && msg
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        {
+                            self.search_index = Some(i);
+                            self.log_scroll = if i > 5 { i as u16 - 5 } else { 0 };
+                            return;
+                        }
+                    }
                 }
-            }
-        }
-
-        // Wrap around to end
-        for i in (start_index..self.logs.len()).rev() {
-            if let Some((msg, _)) = self.logs.get(i)
-                && msg
-                    .to_lowercase()
-                    .contains(&self.search_query.to_lowercase())
-            {
-                self.search_index = Some(i);
-                self.log_scroll = if i > 5 { i as u16 - 5 } else { 0 };
-                return;
+                DashboardFocus::Inspector => {
+                    // Previous match in Inspector not implemented yet for simple string.
+                    // Just finding first match is a start.
+                }
             }
         }
     }
@@ -812,6 +1153,38 @@ impl App {
         });
     }
 
+    pub fn update_velocity(&mut self) {
+        let elapsed = self.last_velocity_update.elapsed();
+
+        if elapsed >= std::time::Duration::from_secs(1) {
+            self.event_velocity.push_back(self.event_counter);
+            self.event_counter = 0;
+            if self.event_velocity.len() > 100 {
+                self.event_velocity.pop_front();
+            }
+            self.last_velocity_update = std::time::Instant::now();
+        }
+    }
+
+    pub fn toggle_breakpoint(&mut self) {
+        if self.analysis_index < self.history.len() {
+            let task_name = self.history[self.analysis_index].name.clone();
+            if self.breakpoints.contains(&task_name) {
+                self.breakpoints.remove(&task_name);
+                self.notification = Some((
+                    format!("Breakpoint removed: {}", task_name),
+                    std::time::Instant::now(),
+                ));
+            } else {
+                self.notification = Some((
+                    format!("Breakpoint set: {}", task_name),
+                    std::time::Instant::now(),
+                ));
+                self.breakpoints.insert(task_name);
+            }
+        }
+    }
+
     pub fn copy_to_clipboard(&mut self, text: String) {
         if let Err(e) = self.clipboard.set_text(text) {
             self.notification =
@@ -828,6 +1201,66 @@ impl App {
         let session = crate::session::Session::from_app(self);
         session.save(filename)?;
         Ok(())
+    }
+
+    pub fn prepare_edit(&mut self, key: String) -> std::io::Result<()> {
+        if let Some(val) = self.get_var_value(&key) {
+            let content = if let Ok(s) = serde_json::to_string_pretty(&val) {
+                s
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Failed to serialize variable",
+                ));
+            };
+
+            // Create temp file
+            let mut temp_file = tempfile::Builder::new()
+                .prefix("piloteer_edit_")
+                .suffix(".json")
+                .tempfile()?;
+
+            use std::io::Write;
+            write!(temp_file.as_file_mut(), "{}", content)?;
+            let (_file, path) = temp_file.keep()?;
+
+            self.edit_state = EditState::EditingValue {
+                key,
+                temp_file: path,
+            };
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Variable not found",
+            ))
+        }
+    }
+
+    pub fn apply_edit(&mut self) -> Result<(String, serde_json::Value), String> {
+        if let EditState::EditingValue { key, temp_file } = &self.edit_state {
+            let key_clone = key.clone();
+            let content = std::fs::read_to_string(temp_file)
+                .map_err(|e| format!("Failed to read temp file: {}", e))?;
+
+            // Clean up
+            let _ = std::fs::remove_file(temp_file);
+
+            let val: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+            self.edit_state = EditState::Idle;
+            Ok((key_clone, val))
+        } else {
+            Err("Not in editing state".to_string())
+        }
+    }
+
+    pub fn cancel_edit(&mut self) {
+        if let EditState::EditingValue { temp_file, .. } = &self.edit_state {
+            let _ = std::fs::remove_file(temp_file);
+        }
+        self.edit_state = EditState::Idle;
     }
 
     pub fn from_session(filename: &str) -> std::io::Result<Self> {
@@ -854,5 +1287,207 @@ impl App {
         app.current_task = Some("REPLAY MODE".to_string());
 
         Ok(app)
+    }
+}
+
+#[cfg(test)]
+mod tests_app {
+    use super::*;
+
+    #[test]
+    fn test_update_velocity() {
+        let config = crate::config::Config {
+            // Correct Fields from src/config.rs
+            openai_api_key: None,
+            socket_path: "/tmp/piloteer.sock".to_string(),
+            model: "gpt-4".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            log_level: "info".to_string(),
+            auth_token: None,
+            bind_addr: None,
+            secret_token: None,
+            quota_limit_tokens: None,
+            quota_limit_usd: None,
+            google_client_id: None,
+            google_client_secret: None,
+            zipkin_endpoint: None,
+            zipkin_service_name: "ansible-piloteer".to_string(),
+            zipkin_sample_rate: 1.0,
+            filters: None,
+            provider: None,
+        };
+
+        let mut app = App::new(config);
+
+        // Initial state
+        assert_eq!(app.event_counter, 0);
+        assert!(app.event_velocity.is_empty());
+
+        // Simulate events
+        app.event_counter = 50;
+
+        // Explicitly set time to avoid test flakiness
+        app.last_velocity_update = std::time::Instant::now();
+        let initial_time = app.last_velocity_update;
+
+        app.update_velocity();
+
+        // Assert no update yet
+        assert_eq!(app.last_velocity_update, initial_time);
+        assert_eq!(app.event_counter, 50);
+        assert!(app.event_velocity.is_empty());
+
+        // Sleep to test the update trigger
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        app.event_counter = 50;
+        app.update_velocity();
+
+        // Now it MUST have updated
+        assert_eq!(app.event_counter, 0);
+        assert!(!app.event_velocity.is_empty());
+        assert_eq!(*app.event_velocity.back().unwrap(), 50);
+    }
+
+    #[test]
+    fn test_set_task() {
+        let config = crate::config::Config {
+            openai_api_key: None,
+            socket_path: "/tmp/piloteer.sock".to_string(),
+            model: "gpt-4".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            log_level: "info".to_string(),
+            auth_token: None,
+            bind_addr: None,
+            secret_token: None,
+            quota_limit_tokens: None,
+            quota_limit_usd: None,
+            google_client_id: None,
+            google_client_secret: None,
+            zipkin_endpoint: None,
+            zipkin_service_name: "ansible-piloteer".to_string(),
+            zipkin_sample_rate: 1.0,
+            filters: None,
+            provider: None,
+        };
+
+        let mut app = App::new(config);
+
+        assert_eq!(app.current_task, None);
+        assert_eq!(app.task_vars, None);
+
+        let task_name = "Test Task".to_string();
+        let vars = serde_json::json!({"foo": "bar"});
+        let facts = Some(serde_json::json!({"ansible_os_family": "Debian"}));
+
+        app.set_task(task_name.clone(), vars.clone(), facts.clone());
+
+        assert_eq!(app.current_task, Some(task_name));
+        assert_eq!(app.task_vars, Some(vars));
+        assert_eq!(app.facts, facts);
+        assert!(app.task_start_time.is_some());
+    }
+
+    #[test]
+    fn test_toggle_breakpoint() {
+        let config = crate::config::Config {
+            openai_api_key: None,
+            socket_path: "/tmp/piloteer.sock".to_string(),
+            model: "gpt-4".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            log_level: "info".to_string(),
+            auth_token: None,
+            bind_addr: None,
+            secret_token: None,
+            quota_limit_tokens: None,
+            quota_limit_usd: None,
+            google_client_id: None,
+            google_client_secret: None,
+            zipkin_endpoint: None,
+            zipkin_service_name: "ansible-piloteer".to_string(),
+            zipkin_sample_rate: 1.0,
+            filters: None,
+            provider: None,
+        };
+
+        let mut app = App::new(config);
+
+        // Add dummy history
+        app.history.push(TaskHistory {
+            name: "Task 1".to_string(),
+            host: "localhost".to_string(),
+            changed: false,
+            failed: false,
+            duration: 0.0,
+            error: None,
+            verbose_result: None,
+            analysis: None,
+        });
+
+        // Test Toggling
+        app.analysis_index = 0;
+        assert!(!app.breakpoints.contains("Task 1"));
+
+        app.toggle_breakpoint();
+        assert!(app.breakpoints.contains("Task 1"));
+        assert!(app.notification.is_some());
+
+        app.toggle_breakpoint();
+        assert!(!app.breakpoints.contains("Task 1"));
+    }
+
+    #[test]
+    fn test_variable_editing_flow() {
+        let config = crate::config::Config {
+            openai_api_key: None,
+            socket_path: "/tmp/piloteer_test_edit.sock".to_string(),
+            model: "gpt-4".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            log_level: "info".to_string(),
+            auth_token: None,
+            bind_addr: None,
+            secret_token: None,
+            quota_limit_tokens: None,
+            quota_limit_usd: None,
+            google_client_id: None,
+            google_client_secret: None,
+            zipkin_endpoint: None,
+            zipkin_service_name: "ansible-piloteer".to_string(),
+            zipkin_sample_rate: 1.0,
+            filters: None,
+            provider: None,
+        };
+        let mut app = App::new(config);
+
+        // Setup Task Vars
+        let vars = serde_json::json!({"test_var": "initial_value", "number": 42});
+        app.set_task("Test Task".to_string(), vars, None);
+
+        // 1. Prepare Edit
+        assert!(app.prepare_edit("test_var".to_string()).is_ok());
+
+        // Verify State
+        let temp_path = if let EditState::EditingValue { key, temp_file } = &app.edit_state {
+            assert_eq!(key, "test_var");
+            temp_file.clone()
+        } else {
+            panic!("App not in EditingValue state");
+        };
+
+        // 2. Simulate External Edit
+        let new_content =
+            serde_json::to_string_pretty(&serde_json::json!("modified_value")).unwrap();
+        std::fs::write(&temp_path, new_content).expect("Failed to write to temp file");
+
+        // 3. Apply Edit
+        let result = app.apply_edit();
+        assert!(result.is_ok());
+        let (key, value) = result.unwrap();
+
+        assert_eq!(key, "test_var");
+        assert_eq!(value, serde_json::json!("modified_value"));
+        assert!(matches!(app.edit_state, EditState::Idle));
+
+        // Ensure temp file is gone
+        assert!(!temp_path.exists());
     }
 }

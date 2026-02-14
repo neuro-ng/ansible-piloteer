@@ -29,6 +29,7 @@ opentelemetry = { version = "0.27", features = ["trace"] }
 opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-rustls"] }
 regex = "1.12.3"
+tempfile = "3.24.0"
 
 [dev-dependencies]
 tempfile = "3.24.0"

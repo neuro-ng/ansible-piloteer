@@ -1,0 +1,16 @@
+---
+- name: Unreachable Host Interactive Test
+  hosts: ubuntu
+  gather_facts: no
+  tasks:
+    - name: Prepare Failure
+      command: echo "Preparing failure..."
+      delegate_to: localhost
+      run_once: yes
+
+    - name: Verify Connectivity
+      command: echo "I am alive"
+      
+    - name: Verify Recovery
+      debug:
+        msg: "Host recovered!"

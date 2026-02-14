@@ -1,0 +1,35 @@
+---
+- name: Verify Core Modules
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Create a directory (file module)
+      file:
+        path: /tmp/piloteer_core_test
+        state: directory
+        mode: '0755'
+
+    - name: Copy a file (copy module)
+      copy:
+        content: "Core Test Content\n"
+        dest: /tmp/piloteer_core_test/test_file.txt
+        mode: '0644'
+
+    - name: Modify file content (lineinfile module)
+      lineinfile:
+        path: /tmp/piloteer_core_test/test_file.txt
+        line: "Appended Line"
+        state: present
+
+    - name: Install a generic package (package module)
+      package:
+        name: curl
+        state: present
+
+    - name: Verify Service Status (service module - Ubuntu/CentOS only)
+      service:
+        name: sshd
+        state: started
+      when: ansible_service_mgr == "systemd"

@@ -1,0 +1,26 @@
+FROM quay.io/centos/centos:stream9
+
+RUN dnf -y install openssh-server python3 sudo && dnf clean all
+RUN ssh-keygen -A
+
+# Create ansible_piloteer user
+RUN useradd -m -s /bin/bash ansible_piloteer && \
+    mkdir -p /home/ansible_piloteer/.ssh && \
+    chmod 700 /home/ansible_piloteer/.ssh && \
+    chown -R ansible_piloteer:ansible_piloteer /home/ansible_piloteer
+
+# Configure passwordless sudo for ansible_piloteer
+RUN mkdir -p /etc/sudoers.d && \
+    echo "ansible_piloteer ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible_piloteer && \
+    chmod 0440 /etc/sudoers.d/ansible_piloteer
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd
+# Disable strict modes to allow mounted keys to work regardless of owner (for testing simplicity)
+RUN sed -i 's/#StrictModes yes/StrictModes no/' /etc/ssh/sshd_config
+# Unlock root account just in case but we use key-based auth for user
+RUN echo 'root:password' | chpasswd
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]

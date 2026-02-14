@@ -7,6 +7,17 @@ import time
 
 display = Display()
 
+class SafeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        try:
+            return super(SafeEncoder, self).default(obj)
+        except TypeError:
+            return str(obj)
+
+    def login(self, obj):
+        # Ansible internal objects often fail serialization
+        return str(obj)
+
 class StrategyModule(LinearStrategyModule):
     def __init__(self, tqm):
         print("DEBUG: Piloteer Strategy Init", flush=True)
@@ -38,21 +49,11 @@ class StrategyModule(LinearStrategyModule):
     def _send(self, data):
         if self.sock:
             try:
-                msg = json.dumps(data) + "\n"
-            except TypeError:
-                 msg = json.dumps({"Error": "Serialization Failed"}) + "\n"
+                # Use SafeEncoder for robust serialization
+                msg = json.dumps(data, cls=SafeEncoder) + "\n"
+            except Exception as e:
+                 msg = json.dumps({"Error": f"Serialization Failed: {str(e)}"}) + "\n"
             self.sock.sendall(msg.encode('utf-8'))
-
-    def _serialize_safe(self, obj, depth=0):
-        if depth > 5:
-            return "<MaxDepth>"
-        if isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        if isinstance(obj, dict):
-            return {k: self._serialize_safe(v, depth+1) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._serialize_safe(v, depth+1) for v in obj]
-        return str(obj)
 
     def _wait_for_proceed(self):
         if not self.sock:
@@ -124,19 +125,18 @@ class StrategyModule(LinearStrategyModule):
                 # Host Unreachable!
                 host = res._host
                 task = res._task.get_name()
-                result_data = res._result
+                result_data = getattr(res, '_result', getattr(res, '_return_data', {}))
                 
                 # Extract connection error
                 error_msg = result_data.get('msg', 'Host unreachable')
                 
                 # Notify Piloteer
-                safe_result = self._serialize_safe(result_data)
                 self._send({
                     "TaskUnreachable": {
                         "name": task,
                         "host": host.name,
                         "error": error_msg,
-                        "result": safe_result
+                        "result": result_data
                     }
                 })
                 # Don't enter debug loop for unreachable - just log and continue
@@ -150,8 +150,7 @@ class StrategyModule(LinearStrategyModule):
                 result_data = res._return_data
                 
                 # Notify Piloteer
-                safe_result = self._serialize_safe(result_data)
-                self._send({"TaskFail": {"name": task, "result": safe_result}})
+                self._send({"TaskFail": {"name": task, "result": result_data}})
                 
                 # Enter "Debug Mode" Loop
                 while True:
@@ -204,7 +203,7 @@ class StrategyModule(LinearStrategyModule):
                                 "host": host.name,
                                 "changed": False,
                                 "failed": True,
-                                "verbose_result": safe_result
+                                "verbose_result": result_data
                             }
                         })
                         cleaned_results.append(res)
@@ -213,14 +212,13 @@ class StrategyModule(LinearStrategyModule):
             else:
                 # Task Succeeded
                 is_changed = res.is_changed()
-                safe_result = self._serialize_safe(res._return_data)
                 self._send({
                     "TaskResult": {
                         "name": res.task_name,
                         "host": res.host.name,
                         "changed": is_changed,
                         "failed": False,
-                        "verbose_result": safe_result
+                        "verbose_result": res._return_data
                     }
                 })
                 cleaned_results.append(res)
@@ -261,15 +259,9 @@ class StrategyModule(LinearStrategyModule):
             first_host, first_task = hosts_tasks[0]
             if first_task:
                  task_vars = self._tqm._variable_manager.get_vars(host=first_host, task=first_task)
-                 serializable_vars = {}
-                 for k, v in task_vars.items():
-                    if k.startswith("ansible_"): continue 
-                    try:
-                        json.dumps(v)
-                        serializable_vars[k] = v
-                    except:
-                        serializable_vars[k] = "<Non-Serializable>"
-
+                 # Filter internal vars but let SafeEncoder handle the rest
+                 serializable_vars = {k: v for k, v in task_vars.items() if not k.startswith("ansible_")}
+                 
                  self._send({"TaskStart": {"name": first_task.get_name(), "task_vars": serializable_vars}})
                  self._wait_for_proceed()
         return hosts_tasks

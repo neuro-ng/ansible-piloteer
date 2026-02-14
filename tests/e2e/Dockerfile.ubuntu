@@ -1,0 +1,25 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y openssh-server python3 sudo
+# Create ansible_piloteer user
+RUN useradd -m -s /bin/bash ansible_piloteer && \
+    mkdir -p /home/ansible_piloteer/.ssh && \
+    chmod 700 /home/ansible_piloteer/.ssh && \
+    chown -R ansible_piloteer:ansible_piloteer /home/ansible_piloteer
+
+# Configure passwordless sudo for ansible_piloteer
+RUN echo "ansible_piloteer ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible_piloteer && \
+    chmod 0440 /etc/sudoers.d/ansible_piloteer
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd
+# Disable strict modes to allow mounted keys to work regardless of owner (for testing simplicity)
+RUN sed -i 's/#StrictModes yes/StrictModes no/' /etc/ssh/sshd_config
+# Unlock root account just in case but we use key-based auth for user
+RUN echo 'root:password' | chpasswd
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+# SSH login fix. Otherwise user is kicked off after login
+RUN sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]

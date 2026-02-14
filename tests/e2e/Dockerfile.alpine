@@ -1,0 +1,41 @@
+FROM alpine:3.19
+
+RUN apk add --no-cache openssh python3 sudo
+RUN ssh-keygen -A
+
+# Create ansible_piloteer user
+RUN adduser -D -s /bin/sh ansible_piloteer && \
+    mkdir -p /home/ansible_piloteer/.ssh && \
+    chmod 700 /home/ansible_piloteer/.ssh && \
+    chown -R ansible_piloteer:ansible_piloteer /home/ansible_piloteer
+
+# Configure passwordless sudo for ansible_piloteer
+RUN echo "ansible_piloteer ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible_piloteer && \
+    chmod 0440 /etc/sudoers.d/ansible_piloteer
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd
+# Disable strict modes to allow mounted keys to work regardless of owner (for testing simplicity)
+RUN sed -i 's/#StrictModes yes/StrictModes no/' /etc/ssh/sshd_config
+# Unlock root account just in case but we use key-based auth for user
+RUN echo 'root:password' | chpasswd
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+# Create entrypoint to copy mounted key to correct location with correct permissions
+RUN echo '#!/bin/sh' > /entrypoint.sh && \
+    echo 'if [ -f /home/ansible_piloteer/.ssh/authorized_keys ]; then' >> /entrypoint.sh && \
+    echo '  cp /home/ansible_piloteer/.ssh/authorized_keys /home/ansible_piloteer/.ssh/authorized_keys_prod' >> /entrypoint.sh && \
+    echo '  chown ansible_piloteer:ansible_piloteer /home/ansible_piloteer/.ssh/authorized_keys_prod' >> /entrypoint.sh && \
+    echo '  chmod 600 /home/ansible_piloteer/.ssh/authorized_keys_prod' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    echo '/usr/sbin/sshd -D -e' >> /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+# Unlock user account
+RUN echo "ansible_piloteer:ansible_piloteer" | chpasswd
+
+# Update sshd_config to look for the prod key
+RUN sed -i 's|AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys_prod|' /etc/ssh/sshd_config
+
+EXPOSE 22
+CMD ["/entrypoint.sh"]

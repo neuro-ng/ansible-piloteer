@@ -1,0 +1,28 @@
+[
+    {
+        "task_name": "Long Running Task",
+        "on_failure": false,
+        "actions": [
+            {
+                "ExecuteCommand": {
+                    "cmd": "(sleep 2 && docker stop ubuntu-1) &"
+                }
+            },
+            "Resume"
+        ]
+    },
+    {
+        "task_name": "Long Running Task",
+        "on_failure": true,
+        "actions": [
+            {
+                "ExecuteCommand": {
+                    "cmd": "docker start ubuntu-1 && sleep 10"
+                }
+            },
+            {
+                "Retry": null
+            }
+        ]
+    }
+]

@@ -1,0 +1,30 @@
+[
+    {
+        "task_name": "Prepare Failure",
+        "on_failure": false,
+        "actions": [
+            {
+                "ExecuteCommand": {
+                    "cmd": "docker stop ubuntu-1"
+                }
+            }
+        ]
+    },
+    {
+        "task_name": "Verify Connectivity",
+        "on_failure": true,
+        "actions": [
+            {
+                "ExecuteCommand": {
+                    "cmd": "docker start ubuntu-1"
+                }
+            },
+            {
+                "ExecuteCommand": {
+                    "cmd": "sleep 10"
+                }
+            },
+            "Retry"
+        ]
+    }
+]

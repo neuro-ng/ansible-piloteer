@@ -21,6 +21,7 @@ fn test_session_save_and_load() {
         zipkin_service_name: "ansible-piloteer".to_string(),
         zipkin_sample_rate: 1.0,
         filters: None,
+        provider: None,
     });
 
     // We need to construct App manually or via new

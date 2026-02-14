@@ -25,6 +25,7 @@ pub struct Config {
     pub zipkin_service_name: String,
     pub zipkin_sample_rate: f64,
     pub filters: Option<HashMap<String, String>>, // [NEW]
+    pub provider: Option<String>,                 // [NEW]
 }
 
 impl Config {
@@ -63,6 +64,7 @@ impl Config {
             .set_default("zipkin_service_name", "ansible-piloteer")?
             .set_default("zipkin_sample_rate", 1.0)?
             .set_default("filters", None::<HashMap<String, String>>)? // [NEW]
+            .set_default("provider", None::<String>)? // [NEW]
             .add_source(File::with_name("piloteer").required(false)) // CWD
             .add_source(Environment::with_prefix("PILOTEER"));
 
@@ -129,6 +131,7 @@ mod tests {
         assert_eq!(config.api_base, "https://api.openai.com/v1");
         assert!(config.openai_api_key.is_none());
         assert!(config.auth_token.is_none());
+        assert!(config.provider.is_none());
     }
 
     #[test]

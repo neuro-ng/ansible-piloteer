@@ -1,0 +1,13 @@
+---
+- name: Bad Output Test
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Cat Binary File
+      ansible.builtin.command: cat /bin/ls
+      ignore_errors: true
+      register: result
+
+    - name: Debug Binary Output
+      ansible.builtin.debug:
+        var: result.stdout

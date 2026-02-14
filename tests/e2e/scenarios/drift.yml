@@ -1,0 +1,10 @@
+---
+- name: Drift Detection Test
+  hosts: ubuntu
+  gather_facts: false
+  tasks:
+    - name: Create a drift test file
+      ansible.builtin.copy:
+        content: "This file is for testing drift detection."
+        dest: /tmp/drift_test_file.txt
+        mode: '0644'

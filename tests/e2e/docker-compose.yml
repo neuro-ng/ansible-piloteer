@@ -1,0 +1,61 @@
+version: '3.8'
+
+x-common-volumes: &common-volumes
+  volumes:
+    - ./id_ed25519.pub:/home/ansible_piloteer/.ssh/authorized_keys:ro
+
+services:
+  ubuntu-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu
+    ports: ["2221:22", "8081:80"]
+    hostname: ubuntu-1
+    <<: *common-volumes
+  ubuntu-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu
+    ports: ["2222:22", "8082:80"]
+    hostname: ubuntu-2
+    <<: *common-volumes
+  ubuntu-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu
+    ports: ["2223:22", "8083:80"]
+    hostname: ubuntu-3
+    <<: *common-volumes
+
+  alpine-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    ports: ["2231:22"]
+    hostname: alpine-1
+    <<: *common-volumes
+  alpine-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    ports: ["2232:22"]
+    hostname: alpine-2
+    <<: *common-volumes
+
+  centos-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.centos
+    ports: ["2241:22"]
+    hostname: centos-1
+    <<: *common-volumes
+  centos-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.centos
+    ports: ["2242:22"]
+    hostname: centos-2
+    <<: *common-volumes
+
+  # NixOS skipped for now
+  # nixos-1: ...

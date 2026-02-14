@@ -1,0 +1,15 @@
+---
+- name: Sudden Disconnect Test
+  hosts: ubuntu
+  gather_facts: false
+  tasks:
+    - name: Prepare for Disconnect
+      ansible.builtin.debug:
+        msg: "Starting disconnect test..."
+
+    - name: Long Running Task
+      ansible.builtin.command: sleep 20
+      ignore_errors: true
+
+    - name: Verify Recovery
+      ansible.builtin.ping:

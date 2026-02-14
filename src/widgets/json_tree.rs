@@ -607,3 +607,132 @@ impl StatefulWidget for JsonTree {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_flatten_simple() {
+        let value = json!({
+            "key1": "value1",
+            "key2": 42
+        });
+        let state = JsonTreeState::new(value);
+
+        // Initial state: expanded by default (because lines are generated)
+        // Actually, logic is: is_expanded = !collapsed_paths.contains(path)
+        // And collapsed_paths is empty initially.
+        // So everything expanded.
+
+        // Structure:
+        // key1: "value1"
+        // key2: 42
+        // closing brace? No, root object fields are top level if flatten called on them?
+        // flatten_value called on root value with empty path.
+        // Root is object. is_collapsible=true. is_expanded=true.
+        // It iterates fields.
+        // Line for key1.
+        // Line for key2.
+        // Line for closing brace "}".
+        // Wait, root itself is NOT a line?
+        // flatten_value pushes line for current value.
+        // So line 0 is "{".
+        // line 1 is key1.
+        // line 2 is key2.
+        // line 3 is "}".
+
+        // Note: Field order in JSON object is not guaranteed by serde_json, but usually insertion order or alphabetical?
+        // Actually, serde_json::Value uses BTreeMap or IndexMap depending on features. Default is BTreeMap (sorted keys).
+        // So key1 comes before key2.
+
+        // Line 0: { (key=None, path = "")
+        // Line 1: key1: "value1" (key="key1", path="key1")
+        // Line 2: key2: 42 (key="key2", path="key2")
+        // Line 3: } (path=".}")
+
+        // Wait, line 0 logic:
+        // flatten_value(val, path="", depth=0, key=None)
+        // val is object. is_collapsible=true. is_expanded=true.
+        // value_str = "{".
+        // Pushes line { path: "", depth: 0, key: None, value_str: "{" ... }
+        // Then iter children.
+        // Child 1: flatten_value("value1", "key1", 1, "key1") -> Pushes line { path: "key1", ... value_str: "\"value1\"" }
+        // Child 2: flatten_value(42, "key2", 1, "key2") -> Pushes line { path: "key2", ... value_str: "42" }
+        // Then pushes line { path: ".}", ... value_str: "}" }
+
+        assert_eq!(state.lines.len(), 4);
+        assert_eq!(state.lines[0].value_str, "{");
+        assert_eq!(state.lines[3].value_str, "}");
+    }
+
+    #[test]
+    fn test_expand_collapse() {
+        let value = json!({
+            "nested": {
+                "foo": "bar"
+            }
+        });
+        let mut state = JsonTreeState::new(value);
+
+        // Initial:
+        // 0: {
+        // 1: "nested": {
+        // 2:   "foo": "bar"
+        // 3: }
+        // 4: }
+        assert_eq!(state.lines.len(), 5);
+
+        // Select line 1 ("nested") and collapse it
+        // Line 1 path should be "nested".
+        state.selected_line = 1;
+        state.toggle_collapse();
+
+        // "nested" path added to collapsed_paths
+        // Recalc:
+        // 0: {
+        // 1: "nested": { ... }
+        // 2: }
+        assert_eq!(state.lines.len(), 3);
+        assert_eq!(state.lines[1].value_str, "{ ... }");
+
+        // Expand again
+        state.toggle_collapse();
+        assert_eq!(state.lines.len(), 5);
+    }
+
+    #[test]
+    fn test_search() {
+        let value = json!({
+            "name": "Ansible",
+            "stat": 100
+        });
+        let mut state = JsonTreeState::new(value);
+
+        state.set_search("ansible".to_string());
+
+        // Should find "Ansible" (value) at line...
+        // 0: {
+        // 1: "name": "Ansible"
+        // 2: "stat": 100
+        // 3: }
+        // Match at line 1.
+
+        if !state.matched_lines.is_empty() {
+            assert_eq!(state.matched_lines[0], 1);
+            assert_eq!(state.selected_line, 1); // Auto-jump
+        } else {
+            // Debug if failed
+            // panic!("Search failed to find 'ansible'");
+            assert!(false, "Search failed to find 'ansible'");
+        }
+
+        state.set_search("stat".to_string());
+        // Match at line 2 key.
+        if !state.matched_lines.is_empty() {
+            assert_eq!(state.matched_lines[0], 2);
+        } else {
+            assert!(false, "Search failed to find 'stat'");
+        }
+    }
+}

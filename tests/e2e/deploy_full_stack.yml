@@ -1,0 +1,116 @@
+---
+- name: Deploy Data Tier (Redis)
+  hosts: alpine
+  become: yes
+  tasks:
+    - name: Install Redis
+      apk:
+        name: redis
+        state: present
+        update_cache: yes
+
+    - name: Configure Redis
+      template:
+        src: templates/redis.conf.j2
+        dest: /etc/redis.conf
+        mode: '0644'
+      notify: Restart Redis
+
+    - name: Ensure Redis is running
+      # Alpine container might not have openrc service manager running correctly in docker
+      # We'll use command directly if service fails or for simplicity in this minimal env
+      command: redis-server /etc/redis.conf --daemonize yes
+      register: redis_start
+      changed_when: "'Starting' in redis_start.stdout"
+      failed_when: false # Ignore if already running for this simple test
+
+  handlers:
+    - name: Restart Redis
+      shell: pkill redis-server || true; redis-server /etc/redis.conf --daemonize yes
+
+- name: Deploy App Tier (Python/Flask)
+  hosts: centos
+  become: yes
+  vars:
+    redis_host: "{{ groups['alpine'][0] }}"
+  tasks:
+    - name: Install Python and dependencies
+      dnf:
+        name:
+          - python3
+          - python3-pip
+          - git
+        state: present
+
+    - name: Install Redis client
+      pip:
+        name: 
+          - redis
+          - flask
+          - gunicorn
+        executable: pip3
+
+    - name: Copy Application Code
+      copy:
+        src: files/app.py
+        dest: /opt/app.py
+        mode: '0755'
+
+    - name: Start Application (Background)
+      shell: |
+        nohup /usr/local/bin/gunicorn --bind 0.0.0.0:5000 app:app > /var/log/app.log 2>&1 &
+      args:
+        chdir: /opt
+      environment:
+        REDIS_HOST: "{{ redis_host }}"
+      async: 10
+      poll: 0
+
+- name: Deploy Web Tier (Nginx)
+  hosts: ubuntu
+  become: yes
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Configure Nginx
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: Reload Nginx
+
+    - name: Ensure Nginx is running
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+- name: Verify Deployment (Integration Test)
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Wait for services to settle
+      pause:
+        seconds: 5
+
+    - name: Test Web Endpoint
+      uri:
+        url: "http://localhost:8081/"
+        return_content: yes
+      register: web_response
+      retries: 5
+      delay: 2
+      until: web_response.status == 200
+
+    - name: Show Response
+      debug:
+        var: web_response.json

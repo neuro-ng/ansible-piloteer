@@ -1,17 +1,21 @@
 use ansible_piloteer::{app, auth, config, ui};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use crossterm::{
     event::{self},
     execute,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::process::Command;
 use std::time::{Duration, Instant}; // [MODIFY]
 // use tokio::net::TcpListener; // Unused for now
 use tokio::sync::mpsc;
 
-use ansible_piloteer::app::{Action, App, TaskHistory};
+use ansible_piloteer::app::{Action, ActiveView, App, TaskHistory};
 use ansible_piloteer::config::Config;
 use ansible_piloteer::ipc::{IpcServer, Message}; // Explicit use
 use ansible_piloteer::widgets::json_tree::JsonTreeState; // [NEW]
@@ -126,9 +130,9 @@ DISTRIBUTED MODE:
 "
 )]
 struct Cli {
-    /// Path to the Ansible playbook
-    #[arg(required = false)]
-    playbook: Option<String>,
+    /// Arguments to forward to ansible-playbook
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    ansible_args: Vec<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -313,7 +317,7 @@ async fn main() -> Result<()> {
         }
         None => {
             run_tui(
-                cli.playbook,
+                cli.ansible_args,
                 cli.report,
                 cli.bind,
                 cli.secret,
@@ -332,7 +336,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(
-    playbook_path: Option<String>,
+    ansible_args: Vec<String>,
     report_path: Option<String>,
     bind_addr: Option<String>,
     secret_token: Option<String>,
@@ -351,9 +355,8 @@ async fn run_tui(
         }
     };
 
-    if let Some(path) = &playbook_path {
-        println!("Playbook provided: {}", path);
-        // In a real implementation, we might pass this to the Ansible runner or Strategy
+    if !ansible_args.is_empty() {
+        println!("Ansible arguments: {:?}", ansible_args);
     }
 
     // Override config with CLI args
@@ -392,6 +395,9 @@ async fn run_tui(
     let socket_path = config.socket_path.clone();
     let bind_addr = config.bind_addr.clone();
     let secret_token = config.secret_token.clone();
+
+    // Load test script if environment variable is set
+    app.load_test_script();
 
     let (to_app_tx, mut to_app_rx) = mpsc::channel::<Message>(100);
     let (from_app_tx, mut from_app_rx) = mpsc::channel::<Message>(100);
@@ -522,9 +528,7 @@ async fn run_tui(
 
     // Spawn Ansible Playbook if provided (AND NOT REPLAY)
     let mut _ansible_child = None;
-    if !app.replay_mode
-        && let Some(playbook) = &playbook_path
-    {
+    if !app.replay_mode && !ansible_args.is_empty() {
         use tokio::process::Command;
 
         let mut cmd = Command::new("ansible-playbook");
@@ -532,7 +536,7 @@ async fn run_tui(
             let v_flag = format!("-{}", "v".repeat(verbose as usize));
             cmd.arg(v_flag);
         }
-        cmd.arg(playbook);
+        cmd.args(&ansible_args);
         cmd.env("ANSIBLE_STRATEGY", "piloteer");
 
         // Try to find plugin path relative to executable or CWD
@@ -697,6 +701,9 @@ async fn run_app(
         // Tick rate for UI refresh
         let tick = tokio::time::sleep(Duration::from_millis(250));
 
+        // Update Event Velocity
+        app.update_velocity();
+
         // This select acts as our event loop
         tokio::select! {
             // Handle IPC messages (only if not complete)
@@ -762,15 +769,85 @@ async fn run_app(
                                 // Store span for later updates
                                 app.task_spans.insert(name.clone(), task_span);
 
-                                if headless {
+                                if let Some(idx) =
+                                    app.test_script.iter().position(|a| a.task_name == *name && !a.on_failure)
+                                {
+                                    println!("Headless: Executing Script Action for TaskStart: {}", name);
+                                    let script_action = app.test_script.remove(idx);
+                                    for action in script_action.actions {
+                                        match action {
+                                            ansible_piloteer::app::ScriptActionType::Pause => {
+                                                println!("Headless: Pausing (Scripted)...");
+                                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                            }
+                                            ansible_piloteer::app::ScriptActionType::Continue => {
+                                                if let Some(tx) = &app.ipc_tx {
+                                                    let _ = tx.send(Message::Continue).await;
+                                                }
+                                            }
+                                            ansible_piloteer::app::ScriptActionType::Retry => {
+                                                if let Some(tx) = &app.ipc_tx {
+                                                    let _ = tx.send(Message::Retry).await;
+                                                }
+                                            }
+                                            ansible_piloteer::app::ScriptActionType::EditVar { key, value } => {
+                                                println!("Headless: ModifyVar {} = {}", key, value);
+                                                if let Some(tx) = &app.ipc_tx {
+                                                    let _ = tx.send(Message::ModifyVar {
+                                                        key,
+                                                        value,
+                                                    })
+                                                    .await;
+                                                }
+                                            }
+                                            ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
+                                                println!("Headless: Executing Command: {}", cmd);
+                                                let output = std::process::Command::new("sh")
+                                                    .arg("-c")
+                                                    .arg(cmd)
+                                                    .output();
+                                                match output {
+                                                    Ok(o) => println!(" Command Finished: status={}", o.status),
+                                                    Err(e) => println!(" Command Failed: {}", e),
+                                                }
+                                            }
+                                            ansible_piloteer::app::ScriptActionType::Resume => {
+                                                println!("Headless: Resuming (Scripted)...");
+                                                if let Some(tx) = &app.ipc_tx {
+                                                    let _ = tx.send(Message::Proceed).await;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        // Small delay between actions
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+                                    // If script actions were executed, we assume they handled control flow.
+                                    // But typically TaskStart just needs Proceed if not scripted to stop.
+                                    // If script didn't send Proceed, we might be stuck?
+                                    // Let's assume script includes "Continue" (which maps to Proceed in TaskStart context?)
+                                    // Message::Proceed is separate.
+                                    // Maybe we add Proceed to ScriptActionType?
+                                    // Or map Continue to Proceed if TaskStart?
+                                    // For now, if no script found, we auto-proceed. If script found, we do exactly what it says.
+                                } else if headless {
                                     println!("Headless: Task Captured: {}", name);
                                     // Auto-proceed for testing
                                     tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
-                                app.waiting_for_proceed = false;
-                                if let Some(tx) = &app.ipc_tx {
-                                    let _ = tx.send(Message::Proceed).await;
-                                    if headless { println!("Headless: Auto-Proceeding..."); }
+                                    app.waiting_for_proceed = false;
+                                    if let Some(tx) = &app.ipc_tx {
+                                        let _ = tx.send(Message::Proceed).await;
+                                        println!("Headless: Auto-Proceeding...");
+                                    }
+                                } else if app.breakpoints.contains(&name) {
+                                    app.waiting_for_proceed = true;
+                                    app.log(format!("Breakpoint Hit: {}", name), Some(ratatui::style::Color::Magenta));
+                                    app.notification = Some((format!("Breakpoint Hit: {}", name), std::time::Instant::now()));
+                                } else {
+                                    app.waiting_for_proceed = false;
+                                    if let Some(tx) = &app.ipc_tx {
+                                        let _ = tx.send(Message::Proceed).await;
+                                    }
                                 }
                             }
                             Message::TaskFail { name, result: _, facts } => {
@@ -790,8 +867,86 @@ async fn run_app(
                                         let vars = app.task_vars.clone().unwrap_or(serde_json::json!({}));
                                         let facts = app.facts.clone();
 
-                                        // Auto-Analyze Logic
-                                        if auto_analyze {
+                                        // Auto-Analyze Logic (only if NOT scripted)
+                                        if let Some(idx) =
+                                            app.test_script.iter().position(|a| a.task_name == *name && a.on_failure)
+                                        {
+                                            println!("Headless: Executing Script Action for TaskFail: {}", name);
+                                            let script_action = app.test_script.remove(idx);
+                                            for action in script_action.actions {
+                                                match action {
+                                                    ansible_piloteer::app::ScriptActionType::Retry => {
+                                                        println!("Headless: Retrying via Script...");
+                                                        if let Some(tx) = &app.ipc_tx {
+                                                            let _ = tx.send(Message::Retry).await;
+                                                        }
+                                                    }
+                                                    ansible_piloteer::app::ScriptActionType::Continue => {
+                                                        println!("Headless: Continuing via Script...");
+                                                        if let Some(tx) = &app.ipc_tx {
+                                                            let _ = tx.send(Message::Continue).await;
+                                                        }
+                                                    }
+                                                    ansible_piloteer::app::ScriptActionType::EditVar { key, value } => {
+                                                        println!("Headless: ModifyVar {} = {}", key, value);
+                                                        if let Some(tx) = &app.ipc_tx {
+                                                            let _ = tx.send(Message::ModifyVar {
+                                                                key,
+                                                                value,
+                                                            })
+                                                            .await;
+                                                        }
+                                                    }
+                                                     ansible_piloteer::app::ScriptActionType::Pause => {
+                                                        println!("Headless: Pausing on Failure (Scripted)...");
+                                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                                    }
+                                                    ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
+                                                        println!("Headless: Executing Command (on failure): {}", cmd);
+                                                        let output = std::process::Command::new("sh")
+                                                            .arg("-c")
+                                                            .arg(cmd)
+                                                            .output();
+                                                        match output {
+                                                            Ok(o) => println!(" Command Finished: status={}", o.status),
+                                                            Err(e) => println!(" Command Failed: {}", e),
+                                                        }
+                                                    }
+                                                    ansible_piloteer::app::ScriptActionType::AskAi => {
+                                                        println!("Headless: Asking AI (Scripted)...");
+                                                        // Always use real client now, configured via base_url for tests
+                                                        match client.analyze_failure(&name, "Task Failed", &vars, facts.as_ref()).await {
+                                                            Ok(analysis) => {
+                                                                 println!("Headless: AI Analysis Received: {:.50}...", analysis.analysis);
+                                                                 app.suggestion = Some(analysis.clone());
+                                                            }
+                                                            Err(e) => println!("Headless: AI Request Failed: {}", e),
+                                                        }
+                                                    }
+                                                    ansible_piloteer::app::ScriptActionType::AssertAiContext { contains } => {
+                                                        println!("Headless: Asserting AI Context...");
+                                                        if let Some(suggestion) = &app.suggestion {
+                                                            if let Some(text) = contains {
+                                                                if suggestion.analysis.contains(&text) {
+                                                                    println!("Headless: Assertion PASSED: Analysis contains '{}'", text);
+                                                                } else {
+                                                                    println!("Headless: Assertion FAILED: Analysis does NOT contain '{}'", text);
+                                                                    // Optional: Panic or exit?
+                                                                    // std::process::exit(1);
+                                                                }
+                                                            } else {
+                                                                println!("Headless: Assertion PASSED: AI Context present.");
+                                                            }
+                                                        } else {
+                                                            println!("Headless: Assertion FAILED: No AI Context found.");
+                                                            // std::process::exit(1);
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                            }
+                                        } else if auto_analyze {
                                             println!("Headless: Analyzing Failure...");
                                             if let Ok(analysis) = client.analyze_failure(&name, "Task Failed", &vars, facts.as_ref()).await {
                                                 println!("\n🤖 AI ANALYSIS:\n{}\n", analysis.analysis);
@@ -860,12 +1015,42 @@ async fn run_app(
                                 }
                             }
                             Message::TaskUnreachable { name, host, error, result } => {
-                                app.set_unreachable(name, host.clone(), error.clone(), result);
+                                app.set_unreachable(name.clone(), host.clone(), error.clone(), result);
 
                                 if headless {
                                     println!("Headless: Host {} unreachable: {}", host, error);
+
+                                    // Check for script actions to recover from Unreachable state
+                                    if let Some(idx) =
+                                        app.test_script.iter().position(|a| a.task_name == *name && a.on_failure)
+                                    {
+                                        println!("Headless: Executing Script Action for TaskUnreachable: {}", name);
+                                        let script_action = app.test_script.remove(idx);
+                                        for action in script_action.actions {
+                                            match action {
+                                                ansible_piloteer::app::ScriptActionType::Retry => {
+                                                    println!("Headless: Retrying via Script...");
+                                                    if let Some(tx) = &app.ipc_tx {
+                                                        let _ = tx.send(Message::Retry).await;
+                                                    }
+                                                }
+                                                ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
+                                                    println!("Headless: Executing Command (on unreachable): {}", cmd);
+                                                    let output = std::process::Command::new("sh")
+                                                        .arg("-c")
+                                                        .arg(cmd)
+                                                        .output();
+                                                    match output {
+                                                        Ok(o) => println!(" Command Finished: status={}", o.status),
+                                                        Err(e) => println!(" Command Failed: {}", e),
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(200)).await;
+                                        }
+                                    }
                                 }
-                                // No interactive debugging for unreachable hosts
                             }
                             Message::PlayRecap { stats } => {
                                 app.log(format!("Play Recap Received: {:?}", stats), Some(ratatui::style::Color::Cyan));
@@ -971,11 +1156,48 @@ async fn run_app(
                            }
                        }
                        Action::EditVar => {
-                           if app.waiting_for_proceed {
-                               #[allow(clippy::collapsible_if)]
-                               if let Some(tx) = &app.ipc_tx {
-                                   let _ = tx.send(Message::ModifyVar { key: "should_fail".to_string(), value: serde_json::json!(false) }).await;
-                                   app.log("Injected: should_fail = false".to_string(), Some(ratatui::style::Color::Magenta));
+                           // Phase 31: Launch External Editor
+                           if let ansible_piloteer::app::EditState::EditingValue { temp_file, .. } = &app.edit_state {
+                               // 1. Suspend TUI
+                               let _ = disable_raw_mode();
+                               let _ = execute!(io::stdout(), LeaveAlternateScreen);
+
+                               // 2. Run Editor
+                               let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                               let status = Command::new(&editor)
+                                   .arg(temp_file)
+                                   .status();
+
+                               // 3. Resume TUI
+                               let _ = execute!(io::stdout(), EnterAlternateScreen);
+                               let _ = enable_raw_mode();
+                               if let Some(t) = terminal {
+                                   let _ = t.clear();
+                                   let _ = t.hide_cursor();
+                               }
+
+                               // 4. Handle Result
+                               if let Ok(status) = status {
+                                   if status.success() {
+                                       match app.apply_edit() {
+                                           Ok((key, value)) => {
+                                                // Send IPC
+                                                if let Some(tx) = &app.ipc_tx {
+                                                    let _ = tx.send(Message::ModifyVar { key: key.clone(), value: value.clone() }).await;
+                                                    app.notification = Some((format!("Updated Variable: {}", key), std::time::Instant::now()));
+                                                }
+                                           },
+                                           Err(e) => {
+                                               app.notification = Some((format!("Edit Failed: {}", e), std::time::Instant::now()));
+                                           }
+                                       }
+                                   } else {
+                                       app.notification = Some(("Editor exited with error".to_string(), std::time::Instant::now()));
+                                       app.cancel_edit();
+                                   }
+                               } else {
+                                    app.notification = Some(("Failed to launch editor".to_string(), std::time::Instant::now()));
+                                    app.cancel_edit();
                                }
                            }
                        }
@@ -1027,10 +1249,12 @@ async fn run_app(
                             app.auto_scroll = !app.auto_scroll;
                             if app.auto_scroll { app.log_scroll = 0; }
                        }
-                       Action::ToggleAnalysis => {
-                            app.show_analysis = !app.show_analysis;
-                            app.scroll_offset = 0;
-                            if app.show_analysis {
+                        Action::ToggleAnalysis => {
+                            if app.active_view == ActiveView::Analysis {
+                                app.active_view = ActiveView::Dashboard;
+                            } else {
+                                app.active_view = ActiveView::Analysis;
+                                app.scroll_offset = 0;
                                 if let Some(task) = app.history.get(app.analysis_index) {
                                      let json_data = task.verbose_result.as_ref().map(|d| d.inner().clone()).unwrap_or_else(|| {
                                          if let Some(err) = &task.error { serde_json::json!({ "error": err }) }
@@ -1039,7 +1263,7 @@ async fn run_app(
                                      app.analysis_tree = Some(JsonTreeState::new(json_data));
                                 } else { app.analysis_tree = None; }
                             }
-                       }
+                        }
                        Action::AnalysisNext => {
                             if !app.history.is_empty() {
                                 app.analysis_index = (app.analysis_index + 1).min(app.history.len() - 1);
@@ -1066,9 +1290,13 @@ async fn run_app(
                                 }
                            }
                        }
-                       Action::ToggleMetrics => {
-                           app.show_metrics = !app.show_metrics;
-                       }
+                        Action::ToggleMetrics => {
+                            if app.active_view == ActiveView::Metrics {
+                                app.active_view = ActiveView::Dashboard;
+                            } else {
+                                app.active_view = ActiveView::Metrics;
+                            }
+                        }
                        Action::ToggleMetricsView => {
                            // Toggle between Dashboard and Heatmap
                            app.metrics_view = match app.metrics_view {
@@ -1076,10 +1304,35 @@ async fn run_app(
                                ansible_piloteer::app::MetricsView::Heatmap => ansible_piloteer::app::MetricsView::Dashboard,
                            };
                        }
+                        Action::SubmitQuery(query_str) => {
+                            // Phase 26: Execute JMESPath Query
+                            app.notification = Some(("Executing Query...".to_string(), std::time::Instant::now()));
+
+                            // Reconstruct Session for Query Context
+                            let session = ansible_piloteer::session::Session::from_app(&app);
+                            match serde_json::to_value(&session) {
+                                Ok(json) => {
+                                    match ansible_piloteer::query::run_query(&query_str, &json) {
+                                        Ok(result) => {
+                                            app.active_view = ActiveView::Analysis;
+                                            app.analysis_tree = Some(JsonTreeState::new(result));
+                                            app.analysis_focus = app::AnalysisFocus::DataBrowser;
+                                            app.notification = Some((format!("Query Executed: {}", query_str), std::time::Instant::now()));
+                                        },
+                                        Err(e) => {
+                                            app.notification = Some((format!("Query Error: {}", e), std::time::Instant::now()));
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    app.notification = Some((format!("Session Serialization Error: {}", e), std::time::Instant::now()));
+                                }
+                            }
+                        }
                        Action::None => {}
-                       Action::Yank => {
-                            if app.show_analysis {
-                                if app.analysis_focus == app::AnalysisFocus::DataBrowser
+                        Action::Yank => {
+                             if app.active_view == ActiveView::Analysis {
+                                 if app.analysis_focus == app::AnalysisFocus::DataBrowser
                                     && let Some(tree) = &app.analysis_tree
                                     && let Some(content) = tree.get_selected_content()
                                 {
@@ -1096,9 +1349,9 @@ async fn run_app(
                            }
                         }
                         Action::YankVisual => {
-                            // Phase 16: Visual mode yank
-                            if app.show_analysis && app.visual_mode {
-                                if let Some(tree) = &app.analysis_tree
+                             // Phase 16: Visual mode yank
+                             if app.active_view == ActiveView::Analysis && app.visual_mode {
+                                 if let Some(tree) = &app.analysis_tree
                                     && let Some(start) = app.visual_start_index
                                 {
                                     let end = tree.selected_line;
@@ -1112,9 +1365,9 @@ async fn run_app(
                             }
                         }
                         Action::YankWithCount => {
-                            // Phase 16: Count-based yank (y3j)
-                            if app.show_analysis {
-                                if let Some(tree) = &app.analysis_tree
+                             // Phase 16: Count-based yank (y3j)
+                             if app.active_view == ActiveView::Analysis {
+                                 if let Some(tree) = &app.analysis_tree
                                     && let Some(count) = app.pending_count
                                     && let Some(content) = tree.get_content_with_count(count)
                                 {
@@ -1124,6 +1377,9 @@ async fn run_app(
                             }
                         }
 
+                        Action::ToggleBreakpoint => {
+                            app.toggle_breakpoint();
+                        }
                         _ => {}
                  }
                      }

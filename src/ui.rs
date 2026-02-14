@@ -12,18 +12,22 @@ use ratatui::{
 use crate::widgets::json_tree::JsonTree;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if app.show_metrics {
-        crate::widgets::metrics::MetricsDashboard::draw(frame, app, frame.area());
-    } else if app.show_analysis {
-        draw_analysis(frame, app);
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(frame.area());
+    match app.active_view {
+        crate::app::ActiveView::Metrics => {
+            crate::widgets::metrics::MetricsDashboard::draw(frame, app, frame.area());
+        }
+        crate::app::ActiveView::Analysis => {
+            draw_analysis(frame, app);
+        }
+        crate::app::ActiveView::Dashboard => {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(frame.area());
 
-        draw_logs(frame, app, chunks[0]);
-        draw_inspector(frame, app, chunks[1]);
+            draw_logs(frame, app, chunks[0]);
+            draw_inspector(frame, app, chunks[1]);
+        }
     }
 
     draw_notification(frame, app);
@@ -35,6 +39,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help(frame);
+    }
+
+    // [NEW] Variable Selector Modal
+    if let crate::app::EditState::SelectingVariable { .. } = &app.edit_state {
+        draw_variable_selector(frame, app);
     }
 
     // [NEW] Phase 3: Connection Alert
@@ -156,7 +165,17 @@ fn draw_analysis(frame: &mut Frame, app: &mut App) {
             } else {
                 "✅ "
             };
-            ListItem::new(format!("{} {}", symbol, t.name)).style(style)
+
+            let mut spans = Vec::new();
+            if app.breakpoints.contains(&t.name) {
+                spans.push(Span::styled("● ", Style::default().fg(Color::Red)));
+            } else {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::raw(symbol));
+            spans.push(Span::raw(t.name.clone()));
+
+            ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
 
@@ -215,28 +234,43 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .map(|(i, (msg, color))| {
             // Check for search match
-            if !app.search_query.is_empty()
-                && msg
-                    .to_lowercase()
-                    .contains(&app.search_query.to_lowercase())
-            {
-                // Highlight match
-                // For simplicity, just style the whole line or parts?
-                // Let's split by query.
-                // Note: basic naive splitting.
+            if !app.search_query.is_empty() {
+                let query = app.search_query.to_lowercase();
+                let msg_lower = msg.to_lowercase();
 
-                // If this is the selected match, add specific background
-                let is_selected = app.search_index == Some(i);
-                let match_style = if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                if msg_lower.contains(&query) {
+                    let is_selected = app.search_index == Some(i);
+                    // Split and highlight
+                    let mut spans = Vec::new();
+                    let mut last_idx = 0;
+
+                    // Find all matches
+                    for (idx, match_str) in msg_lower.match_indices(&query) {
+                        // Push text before match
+                        if idx > last_idx {
+                            spans.push(Span::styled(
+                                &msg[last_idx..idx],
+                                Style::default().fg(*color),
+                            ));
+                        }
+                        // Push match
+                        let match_style = if is_selected {
+                            Style::default().bg(Color::Yellow).fg(Color::Black)
+                        } else {
+                            Style::default().bg(Color::DarkGray).fg(Color::Yellow)
+                        };
+                        spans.push(Span::styled(&msg[idx..idx + match_str.len()], match_style));
+                        last_idx = idx + match_str.len();
+                    }
+                    // Push remaining text
+                    if last_idx < msg.len() {
+                        spans.push(Span::styled(&msg[last_idx..], Style::default().fg(*color)));
+                    }
+
+                    Line::from(spans)
                 } else {
-                    Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-                };
-
-                // For now, simpler approach: If line matches, color it differently
-                // To do proper highlighting we need regex or manual indices.
-                // Let's just highlight the whole line for POC phase 13.
-                Line::from(Span::styled(msg, match_style))
+                    Line::from(Span::styled(msg, Style::default().fg(*color)))
+                }
             } else {
                 Line::from(Span::styled(msg, Style::default().fg(*color)))
             }
@@ -262,12 +296,34 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(
+            if app.active_view == crate::app::ActiveView::Dashboard
+                && app.dashboard_focus == crate::app::DashboardFocus::Logs
+            {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        );
+    let inner_height = area.height.saturating_sub(2); // Subtract borders
+
+    let scroll = if app.auto_scroll {
+        let total_lines = logs.len() as u16;
+        let s = total_lines.saturating_sub(inner_height);
+        // Sync app.log_scroll so manual scrolling starts from the correct position
+        app.log_scroll = s;
+        s
+    } else {
+        app.log_scroll
+    };
 
     let paragraph = Paragraph::new(logs)
         .block(block)
         .wrap(Wrap { trim: true })
-        .scroll((app.log_scroll, 0)); // Use log_scroll
+        .scroll((scroll, 0)); // Use calculated scroll
 
     frame.render_widget(paragraph, area);
 }
@@ -457,10 +513,97 @@ fn draw_inspector(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Highlight content
-    let highlighted_text = app.highlighter.highlight(&content, "json");
+    let mut highlighted_text = app.highlighter.highlight(&content, "json");
+
+    // Apply Search Highlighting
+    if !app.search_query.is_empty() {
+        let query = app.search_query.to_lowercase();
+        // Modify lines
+        for line in &mut highlighted_text.lines {
+            let line_str: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let line_lower = line_str.to_lowercase();
+
+            let matches: Vec<(usize, usize)> = line_lower
+                .match_indices(&query)
+                .map(|(i, m)| (i, i + m.len()))
+                .collect();
+
+            if !matches.is_empty() {
+                let mut new_spans = Vec::new();
+                let mut current_offset = 0;
+
+                for span in &line.spans {
+                    let span_content = span.content.as_ref();
+                    let span_len = span_content.len();
+                    let span_end = current_offset + span_len;
+
+                    let mut last_processed_in_span = 0;
+
+                    for &(m_start, m_end) in &matches {
+                        // Check for overlap
+                        let overlap_start = current_offset.max(m_start);
+                        let overlap_end = span_end.min(m_end);
+
+                        if overlap_start < overlap_end {
+                            // We have an overlap
+                            let relative_start = overlap_start - current_offset;
+                            let relative_end = overlap_end - current_offset;
+
+                            // 1. Text before match in this span
+                            if relative_start > last_processed_in_span {
+                                new_spans.push(Span::styled(
+                                    span_content[last_processed_in_span..relative_start]
+                                        .to_string(),
+                                    span.style,
+                                ));
+                            }
+
+                            // 2. The Matched Text
+                            // Preserve FG, Add BG
+                            // Determine selection style
+                            // (Simplification: We don't have line index here easily to check selected match,
+                            //  but for Inspector we just highlight all matches for now or use simplified selection)
+                            let match_style = span.style.bg(Color::DarkGray).fg(Color::Yellow);
+
+                            new_spans.push(Span::styled(
+                                span_content[relative_start..relative_end].to_string(),
+                                match_style,
+                            ));
+
+                            last_processed_in_span = relative_end;
+                        }
+                    }
+
+                    // 3. Text after all matches in this span
+                    if last_processed_in_span < span_len {
+                        new_spans.push(Span::styled(
+                            span_content[last_processed_in_span..].to_string(),
+                            span.style,
+                        ));
+                    }
+
+                    current_offset += span_len;
+                }
+                *line = Line::from(new_spans);
+            }
+        }
+    }
 
     let inspector = Paragraph::new(highlighted_text)
-        .block(Block::default().borders(Borders::ALL).title("Inspector"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Inspector")
+                .border_style(
+                    if app.active_view == crate::app::ActiveView::Dashboard
+                        && app.dashboard_focus == crate::app::DashboardFocus::Inspector
+                    {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0));
 
@@ -725,5 +868,62 @@ fn draw_detail_view(frame: &mut Frame, app: &mut App) {
             .scroll((0, 0));
 
         frame.render_widget(p, inner_area);
+    }
+}
+
+fn draw_variable_selector(frame: &mut Frame, app: &mut App) {
+    if let crate::app::EditState::SelectingVariable {
+        filter,
+        selected_index,
+    } = &app.edit_state
+    {
+        let area = centered_rect(60, 60, frame.area());
+
+        let block = Block::default()
+            .title("Select Variable to Edit (Enter: Select, Esc: Cancel)")
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black));
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .margin(1)
+            .split(area);
+
+        // Filter Input
+        let filter_p = Paragraph::new(format!("Filter: {}", filter))
+            .block(Block::default().borders(Borders::ALL).title("Search"))
+            .style(Style::default().fg(Color::Yellow));
+        frame.render_widget(filter_p, chunks[0]);
+
+        // Variable List
+        let all_vars = app.get_flattened_vars();
+        let filtered_vars: Vec<&String> = all_vars
+            .iter()
+            .filter(|v| v.to_lowercase().contains(&filter.to_lowercase()))
+            .collect();
+
+        let items: Vec<ListItem> = filtered_vars
+            .iter()
+            .map(|v| ListItem::new(Line::from(vec![Span::raw(*v)])))
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Variables"))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        let mut state = ListState::default();
+        // Ensure index is valid
+        let safe_index = if filtered_vars.is_empty() {
+            0
+        } else {
+            *selected_index % filtered_vars.len()
+        };
+        state.select(Some(safe_index));
+
+        frame.render_stateful_widget(list, chunks[1], &mut state);
     }
 }

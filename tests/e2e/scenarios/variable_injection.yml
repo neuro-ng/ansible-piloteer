@@ -1,0 +1,20 @@
+---
+- name: Variable Injection Interactive Test
+  hosts: localhost
+  gather_facts: no
+  vars:
+    package_name: "wrong_value"
+
+  tasks:
+    - name: Verify Package Name
+      debug:
+        msg: "Current Package: {{ package_name }}"
+
+    - name: Fail if package name is wrong
+      fail:
+        msg: "Package name is incorrect: {{ package_name }}"
+      when: package_name != "curl"
+
+    - name: Success Message
+      debug:
+        msg: "Test Succeeded! Package is {{ package_name }}"

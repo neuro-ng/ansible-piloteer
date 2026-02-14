@@ -1,0 +1,15 @@
+[
+    {
+        "task_name": "Fail if package name is wrong",
+        "on_failure": true,
+        "actions": [
+            {
+                "EditVar": {
+                    "key": "package_name",
+                    "value": "curl"
+                }
+            },
+            "Retry"
+        ]
+    }
+]

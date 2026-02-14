@@ -21,6 +21,7 @@ fn create_test_config() -> Config {
         zipkin_service_name: "ansible-piloteer".to_string(),
         zipkin_sample_rate: 1.0,
         filters: None,
+        provider: None,
     })
 }
 

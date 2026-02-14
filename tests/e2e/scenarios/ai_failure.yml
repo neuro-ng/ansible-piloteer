@@ -1,0 +1,8 @@
+---
+- name: AI Context Verification
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Fail intentionally
+      ansible.builtin.fail:
+        msg: "This is a simulated failure for AI analysis."
