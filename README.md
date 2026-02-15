@@ -9,7 +9,7 @@
     -   **Analysis Mode**:
         -   Deep inspection of JSON facts and task results.
         -   **Search**: Interactive search with highlighting (try `/`).
-        -   **Deep Navigation**: Recursive expand/collapse (`Shift+h`/`Shift+l`).
+        -   **Deep Navigation**: Recursive expand/collapse (`Shift+h`/`Shift+l`/`Left`/`Right`/`Enter`/`Space`).
         -   **Detail View**: Inspect long values in a popup (`w`).
     -   **Host Targeting**: List hosts, filter history, and inspect facts per host (`H` to list, `f` for facts).
 -   **Data Query & Transformation**:
@@ -33,13 +33,17 @@
     -   **Configurable Sampling**: Control trace volume with probabilistic sampling.
 -   **Deep Execution Analysis**:
     -   **Play Recap**: View aggregated execution statistics.
-    -   **Clipboard**: Copy data with `y`.
+    -   **Clipboard**: Copy data with `y`|`<???>y` for multi-line copy i.e. `8y` copy 8 lines to the clipboard.
 -   **AI Chat**:
-    -   **Interactive Chat**: `t` to toggle chat sidebar.
+    -   **Interactive Chat**: `C <shift>+c` to toggle chat sidebar.
     -   **Model Selection**: `/model` to switch between models (e.g., standard vs pro).
-    -   **Navigation**: `PageUp` / `PageDown` to scroll history.
+    -   **Navigation**: `PageUp` / `PageDown`  / `<Mouse scroll>` to scroll history.
     -   **Search**: `/` to search chat history.
-    -   **Folding**: Collapse long messages with `Space`.
+    -   **Folding**: Collapse long messages with `Space`| `Enter`.
+-   **Antigravity IDE Integration**:
+    -   **Shared Auth**: Auto-detects Google ADC (Application Default Credentials) for seamless authentication within the IDE.
+    -   **Token Sync**: Automatically reports Piloteer's AI token usage to the Antigravity dashboard.
+    -   **MCP Server**: Built-in support for the Model Context Protocol (MCP) allowing AI assistants to invoke Piloteer tools.
 -   **Architecture**: Built with a high-performance Rust CLI and a custom Ansible Strategy Plugin (Python).
 
 ## 🛠️ Architecture
@@ -99,6 +103,10 @@ ansible-piloteer auth login
 export PILOTEER_GOOGLE_CLIENT_ID="your-client-id"
 export PILOTEER_GOOGLE_CLIENT_SECRET="your-client-secret"
 ansible-piloteer auth login
+
+# IDE / ADC Authentication (Antigravity compatible)
+# This reads Application Default Credentials directly from ~/.config/gcloud
+ansible-piloteer auth adc
 ```
 
 List stored credentials:
@@ -130,6 +138,9 @@ ansible-piloteer auth list
 | **OAuth** | | |
 | `PILOTEER_GOOGLE_CLIENT_ID` | Google OAuth client ID | None |
 | `PILOTEER_GOOGLE_CLIENT_SECRET` | Google OAuth client secret | None |
+| **Antigravity** | | |
+| `ANTIGRAVITY_SESSION` | Indicates execution within Antigravity IDE | None |
+| `ANTIGRAVITY_WORKSPACE` | Path to current IDE workspace | None |
 
 
 ## 🏃 Usage
@@ -144,6 +155,9 @@ ansible-piloteer auth list
 
  # Run in CI/Headless mode with Auto-Analyze
  PILOTEER_HEADLESS=1 ./target/release/ansible-piloteer playbook.yml --auto-analyze
+
+ # Start MCP Stdio Server (for IDE integration)
+ ./target/release/ansible-piloteer mcp
  ```
  
 ## 🧪 Testing
@@ -247,6 +261,10 @@ When a task fails, the Piloteer enters **Debug Mode**:
 - [Error Handling](docs/error_handling.md) - Unreachable hosts and error recovery
 - [Query Guide](docs/query_guide.md) - JMESPath queries and REPL mode
 - [Zipkin Tracing](docs/zipkin_tracing.md) - Distributed tracing with OpenZipkin
+
+### Integrations
+- [Antigravity IDE](docs/antigravity.md) - Google Antigravity integration guide
+- [MCP Server](docs/mcp.md) - Using Piloteer with Model Context Protocol
 
 ### Advanced Topics
 - [Distributed Mode](docs/distributed_mode.md) - Remote debugging setup
