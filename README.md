@@ -262,10 +262,6 @@ When a task fails, the Piloteer enters **Debug Mode**:
 - [Query Guide](docs/query_guide.md) - JMESPath queries and REPL mode
 - [Zipkin Tracing](docs/zipkin_tracing.md) - Distributed tracing with OpenZipkin
 
-### Integrations
-- [Antigravity IDE](docs/antigravity.md) - Google Antigravity integration guide
-- [MCP Server](docs/mcp.md) - Using Piloteer with Model Context Protocol
-
 ### Advanced Topics
 - [Distributed Mode](docs/distributed_mode.md) - Remote debugging setup
 - [CI/CD Integration](docs/ci_cd_integration.md) - Headless mode and automation
