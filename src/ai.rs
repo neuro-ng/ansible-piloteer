@@ -541,32 +541,31 @@ impl AiClient {
         writeln!(file, "{}", serde_json::to_string(&entry)?)?;
 
         // [Phase 36] Sync usage to Antigravity IDE shared location
-        if std::env::var("ANTIGRAVITY_SESSION").is_ok()
-            || std::env::var("ANTIGRAVITY_WORKSPACE").is_ok()
+        if (std::env::var("ANTIGRAVITY_SESSION").is_ok()
+            || std::env::var("ANTIGRAVITY_WORKSPACE").is_ok())
+            && let Ok(home) = std::env::var("HOME")
         {
-            if let Ok(home) = std::env::var("HOME") {
-                let ag_dir = std::path::PathBuf::from(&home)
-                    .join(".config")
-                    .join("antigravity");
-                let _ = std::fs::create_dir_all(&ag_dir);
-                let ag_path = ag_dir.join("piloteer_usage.jsonl");
-                let usage_entry = serde_json::json!({
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                    "tool": "ansible-piloteer",
-                    "model": self.model,
-                    "tokens": tokens,
-                });
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(ag_path)
-                {
-                    let _ = writeln!(
-                        f,
-                        "{}",
-                        serde_json::to_string(&usage_entry).unwrap_or_default()
-                    );
-                }
+            let ag_dir = std::path::PathBuf::from(&home)
+                .join(".config")
+                .join("antigravity");
+            let _ = std::fs::create_dir_all(&ag_dir);
+            let ag_path = ag_dir.join("piloteer_usage.jsonl");
+            let usage_entry = serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "tool": "ansible-piloteer",
+                "model": self.model,
+                "tokens": tokens,
+            });
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(ag_path)
+            {
+                let _ = writeln!(
+                    f,
+                    "{}",
+                    serde_json::to_string(&usage_entry).unwrap_or_default()
+                );
             }
         }
 
