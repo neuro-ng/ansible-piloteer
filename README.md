@@ -34,11 +34,17 @@
 -   **Deep Execution Analysis**:
     -   **Play Recap**: View aggregated execution statistics.
     -   **Clipboard**: Copy data with `y`.
+-   **AI Chat**:
+    -   **Interactive Chat**: `t` to toggle chat sidebar.
+    -   **Model Selection**: `/model` to switch between models (e.g., standard vs pro).
+    -   **Navigation**: `PageUp` / `PageDown` to scroll history.
+    -   **Search**: `/` to search chat history.
+    -   **Folding**: Collapse long messages with `Space`.
 -   **Architecture**: Built with a high-performance Rust CLI and a custom Ansible Strategy Plugin (Python).
 
 ## 🛠️ Architecture
 
-The system consists of two main components communicating via Unix Domain Sockets:
+The system consists of two main components communicating via Unix Domain Sockets or TCP:
 
 1.  **Piloteer CLI (Rust)**: The user-facing TUI and process controller. It manages the Ansible process and renders the UI.
 2.  **Ansible Strategy Plugin (Python)**: A custom execution strategy that hooks into Ansible internals to capture state, pause execution, and apply runtime modifications.
@@ -84,7 +90,20 @@ Piloteer can be configured via `config.toml`, environment variables, or CLI argu
 To use the hosted AI features with Google Login:
 
 ```bash
-./target/release/ansible-piloteer auth login
+# Default (Google / Gemini Free Tier compatible)
+# Note: For Gemini API, using an API Key is recommended over OAuth default flow.
+# export PILOTEER_GOOGLE_API_KEY="..."
+ansible-piloteer auth login
+
+# Custom Credentials (Recommended for production/billing)
+export PILOTEER_GOOGLE_CLIENT_ID="your-client-id"
+export PILOTEER_GOOGLE_CLIENT_SECRET="your-client-secret"
+ansible-piloteer auth login
+```
+
+List stored credentials:
+```bash
+ansible-piloteer auth list
 ```
 
 ### Environment Variables
@@ -121,7 +140,7 @@ To use the hosted AI features with Google Login:
  
  ```bash
  # Start the Piloteer CLI, which wraps the ansible-playbook command
- ./target/release/ansible-piloteer playbook.yml
+ ./target/release/ansible-piloteer playbook.yml -i inventory.ini -e "env=prod"
 
  # Run in CI/Headless mode with Auto-Analyze
  PILOTEER_HEADLESS=1 ./target/release/ansible-piloteer playbook.yml --auto-analyze
@@ -188,19 +207,30 @@ When a task fails, the Piloteer enters **Debug Mode**:
 -   **`q`**: **Quit** the application.
 
 ### TUI Controls
--   **Search**: `/` to search logs, `n`/`N` to find next/previous match.
--   **Filter**: `l` to toggle log filtering (All -> Failed -> Changed).
--   **Follow**: `F` (Shift+f) to toggle auto-scrolling of logs.
--   **Analysis Mode**:
-    -   `v`: Toggle Analysis Mode (Enter/Exit)
-    -   `j` / `k`: Navigate Task List or Data Tree
-    -   `Enter`: Toggle expand/collapse
-    -   `/`: Search
-    -   `n` / `N`: Next/Prev match
-    -   `h` / `l`: Collapse/Parent / Expand/Child
-    -   `y`: Copy to Clipboard
+-   **General Navigation**:
+    -   **`Tab` / `Shift+Tab`**: Cycle between Dashboard, Analysis, and Metrics views.
+    -   **`PageUp` / `PageDown`**: Scroll the active view (Logs, Inspector, or Analysis).
+    -   `q` / `Esc`: Quit.
+    -   `?`: Toggle Help.
+
+-   **Log View**:
+    -   `/`: Search logs (or use `::query::` prefix for JMESPath query on session data).
+    -   `n` / `N`: Next / Previous match.
+    -   `l`: Toggle log filter (All/Failed/Changed).
+    -   `F`: Toggle Follow mode (Auto-scroll).
+
+-   **Analysis Mode** (active when selected via Tab or `v`):
+    -   `v`: Toggle Analysis Mode (Enter/Exit).
+    -   `V` (Shift+v): Toggle Visual Mode (for selection).
+    -   `j` / `k`: Navigate Task List or Data Tree.
+    -   `Enter`: Toggle expand/collapse.
+    -   `/`: Search within the tree.
+    -   `n` / `N`: Next/Prev match.
+    -   `h` / `l`: Collapse/Parent / Expand/Child.
+    -   `y`: Copy to Clipboard.
+
 -   **Session**:
-    -   `Ctrl+s`: Manually Save Session
+    -   `Ctrl+s`: Manually Save Session.
 
 ## 📚 Documentation
 

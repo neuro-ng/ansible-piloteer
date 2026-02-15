@@ -177,11 +177,35 @@ enum Commands {
         #[arg(short, long, default_value = "pretty-json")]
         format: String,
     },
+    /// Start MCP stdio server for Antigravity IDE integration
+    Mcp,
 }
 
 #[derive(Subcommand)]
 enum AuthCmd {
-    Login,
+    Login {
+        /// Profile name (default: "default")
+        #[arg(long, default_value = "default")]
+        profile: String,
+
+        /// Backend provider (default: "google")
+        #[arg(long, default_value = "google")]
+        backend: String,
+    },
+    /// Authenticate using gcloud Application Default Credentials
+    Gcloud {
+        /// Profile name (default: "default")
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Authenticate using ADC file directly (for IDE environments like Antigravity)
+    Adc {
+        /// Profile name (default: "default")
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// List configured authentication profiles
+    List,
 }
 
 #[tokio::main]
@@ -196,13 +220,13 @@ async fn main() -> Result<()> {
     });
 
     // Initialize tracing if configured
-    if let Err(e) = ansible_piloteer::tracing::init_tracing(&config) {
+    if let Err(e) = ansible_piloteer::telemetry::init_tracing(&config) {
         eprintln!("Warning: Failed to initialize tracing: {}", e);
     }
 
     let result = match cli.command {
         Some(Commands::Auth { cmd }) => match cmd {
-            AuthCmd::Login => {
+            AuthCmd::Login { profile, backend } => {
                 // If credentials are provided in config, use them. Otherwise pass None to use built-in defaults.
                 let (client_id, client_secret) =
                     (config.google_client_id, config.google_client_secret);
@@ -211,23 +235,127 @@ async fn main() -> Result<()> {
                     println!(
                         "No Google OAuth credentials found in config. Using default GCloud credentials."
                     );
+                    println!("⚠️  WARNING: Default credentials do NOT support user-based billing.");
+                    println!(
+                        "   To enable billing against your own Google Cloud project, you must set:"
+                    );
+                    println!("   export PILOTEER_GOOGLE_CLIENT_ID='...'");
+                    println!("   export PILOTEER_GOOGLE_CLIENT_SECRET='...'");
                 }
 
-                println!("Starting Google OAuth login flow...");
+                if backend != "google" {
+                    eprintln!("Currently only 'google' backend supports OAuth login.");
+                    std::process::exit(1);
+                }
+
+                println!(
+                    "Starting Google OAuth login flow for profile: '{}'...",
+                    profile
+                );
+                println!(
+                    "NOTE: If running remotely, ensure you tunnel port 8085 to your local machine:"
+                );
+                println!("      ssh -L 8085:localhost:8085 user@remote-host");
+
                 match auth::login(client_id, client_secret).await {
                     Ok(token) => {
                         println!("Login successful!");
-                        if let Err(e) = Config::save_auth_token(&token) {
+                        if let Err(e) = Config::save_auth_token(&profile, &backend, &token) {
                             eprintln!("Failed to save auth token: {}", e);
                         } else {
-                            println!("Token saved to configuration.");
+                            println!("Token saved to profile '{}'.", profile);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\n❌ Login Failed: {:?}", e);
+
+                        let err_str = e.to_string();
+                        if err_str.contains("invalid_client")
+                            || err_str.contains("Unauthorized")
+                            || err_str.contains("OAuth Server Error")
+                        {
                             println!(
-                                "Note: If you used default credentials, the token is valid for GCloud scopes."
+                                "\n⚠️  The default Google Cloud credentials may be invalid or revoked."
+                            );
+                            println!(
+                                "   To fix this, please create your own OAuth Desktop App credentials:"
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
+            AuthCmd::Gcloud { profile } => {
+                println!("Fetching token from gcloud Application Default Credentials...");
+                println!("If not authenticated, run: gcloud auth application-default login");
+                match auth::get_gcloud_token().await {
+                    Ok(token) => {
+                        println!("✅ Token acquired from gcloud!");
+                        if let Err(e) = Config::save_auth_token(&profile, "google", &token) {
+                            eprintln!("Failed to save auth token: {}", e);
+                        } else {
+                            println!(
+                                "Token saved to profile '{}'. You can now use Google/Vertex AI.",
+                                profile
                             );
                         }
                     }
                     Err(e) => {
-                        eprintln!("Login failed: {:?}", e);
+                        eprintln!("\n❌ gcloud auth failed: {:?}", e);
+                        println!("\nTo authenticate with gcloud:");
+                        println!("  1. gcloud auth application-default login");
+                        println!("  2. piloteer auth gcloud");
+                    }
+                }
+                Ok(())
+            }
+            AuthCmd::Adc { profile } => {
+                println!("Reading Application Default Credentials file...");
+                match auth::get_adc_token().await {
+                    Ok(token) => {
+                        println!("✅ Token acquired from ADC file!");
+                        if let Err(e) = Config::save_auth_token(&profile, "google", &token) {
+                            eprintln!("Failed to save auth token: {}", e);
+                        } else {
+                            println!(
+                                "Token saved to profile '{}'. You can now use Google/Vertex AI.",
+                                profile
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\n❌ ADC auth failed: {:?}", e);
+                        println!("\nTo set up ADC credentials:");
+                        println!("  1. gcloud auth application-default login");
+                        println!("  2. piloteer auth adc");
+                        println!(
+                            "\nOr set GOOGLE_APPLICATION_CREDENTIALS to your service account key."
+                        );
+                    }
+                }
+                Ok(())
+            }
+            AuthCmd::List => {
+                let data = Config::load_auth_data().unwrap_or_default();
+                if data.is_empty() {
+                    println!("No cached credentials found.");
+                    return Ok(());
+                }
+
+                println!(
+                    "{:<15} | {:<10} | {:<40}",
+                    "Profile", "Backend", "Token (Masked)"
+                );
+                println!("{:-<15}-+-{:-<10}-+-{:-<40}", "", "", "");
+
+                for (profile, backends) in data {
+                    for (backend, token) in backends {
+                        let masked_token = if token.len() > 8 {
+                            format!("{}...{}", &token[..4], &token[token.len() - 4..])
+                        } else {
+                            "****".to_string()
+                        };
+                        println!("{:<15} | {:<10} | {:<40}", profile, backend, masked_token);
                     }
                 }
                 Ok(())
@@ -315,6 +443,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Mcp) => ansible_piloteer::mcp::run_stdio_server(),
         None => {
             run_tui(
                 cli.ansible_args,
@@ -330,7 +459,7 @@ async fn main() -> Result<()> {
     };
 
     // Shutdown tracing and flush pending spans
-    ansible_piloteer::tracing::shutdown_tracing();
+    ansible_piloteer::telemetry::shutdown_tracing();
 
     result
 }
@@ -682,6 +811,9 @@ async fn run_app(
         }
     });
 
+    // AI Chat Channel
+    let (ai_tx, mut ai_rx) = mpsc::channel::<anyhow::Result<ansible_piloteer::ai::ChatMessage>>(10);
+
     loop {
         if !headless {
             if let Some(t) = terminal {
@@ -706,6 +838,27 @@ async fn run_app(
 
         // This select acts as our event loop
         tokio::select! {
+             // Handle AI Chat Response
+             Some(res) = ai_rx.recv() => {
+                 app.chat_loading = false;
+                 match res {
+                     Ok(msg) => {
+                         app.chat_history.push(msg);
+                         // Check scroll. If at bottom, auto scroll?
+                         // For now just scroll to latest
+                         app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                     }
+                     Err(e) => {
+                         app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                             role: "system".to_string(),
+                             content: format!("Error: {}", e),
+                             collapsed: false,
+                         });
+                         app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                     }
+                 }
+             }
+
             // Handle IPC messages (only if not complete)
             msg_opt = ipc_rx.recv(), if !ipc_complete => {
                 match msg_opt {
@@ -717,7 +870,7 @@ async fn run_app(
                                 if headless { println!("Headless: Ansible Connected"); }
 
                                 // Create root playbook span
-                                let playbook_span = ansible_piloteer::tracing::create_root_span(
+                                let playbook_span = ansible_piloteer::telemetry::create_root_span(
                                     "playbook.execution",
                                     vec![
                                         opentelemetry::KeyValue::new("service.name", "ansible-piloteer"),
@@ -726,7 +879,7 @@ async fn run_app(
                                 );
 
                                 // Attach span to context and store guard
-                                let guard = ansible_piloteer::tracing::attach_span(playbook_span);
+                                let guard = ansible_piloteer::telemetry::attach_span(playbook_span);
                                 app.playbook_span_guard = Some(guard);
 
                                 if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
@@ -739,7 +892,7 @@ async fn run_app(
                                 app.play_span = None;
 
                                 // Create Play Span
-                                let play_span = ansible_piloteer::tracing::create_child_span(
+                                let play_span = ansible_piloteer::telemetry::create_child_span(
                                     format!("play: {}", name),
                                     vec![
                                         opentelemetry::KeyValue::new("play.name", name.clone()),
@@ -748,7 +901,7 @@ async fn run_app(
                                 );
 
                                 // Attach span
-                                let guard = ansible_piloteer::tracing::attach_span(play_span);
+                                let guard = ansible_piloteer::telemetry::attach_span(play_span);
                                 app.play_span_guard = Some(guard);
 
                                 if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
@@ -759,7 +912,7 @@ async fn run_app(
                                 app.set_task(name.clone(), task_vars.clone(), facts.clone());
 
                                 // Create task span as child of current context (should be play span)
-                                let task_span = ansible_piloteer::tracing::create_child_span(
+                                let task_span = ansible_piloteer::telemetry::create_child_span(
                                     format!("task: {}", name),
                                     vec![
                                         opentelemetry::KeyValue::new("task.name", name.clone()),
@@ -855,8 +1008,8 @@ async fn run_app(
 
                                 // Update task span with failure information
                                 if let Some(span) = app.task_spans.get_mut(&name) {
-                                    ansible_piloteer::tracing::record_error_on_span(span, &format!("Task '{}' failed", name));
-                                    ansible_piloteer::tracing::add_span_attributes(span, vec![
+                                    ansible_piloteer::telemetry::record_error_on_span(span, &format!("Task '{}' failed", name));
+                                    ansible_piloteer::telemetry::add_span_attributes(span, vec![
                                         opentelemetry::KeyValue::new("task.failed", true),
                                     ]);
                                 }
@@ -985,7 +1138,7 @@ async fn run_app(
 
                                 // End task span with final attributes
                                 if let Some(span) = app.task_spans.remove(&name) {
-                                    ansible_piloteer::tracing::end_span(span, vec![
+                                    ansible_piloteer::telemetry::end_span(span, vec![
                                         opentelemetry::KeyValue::new("task.host", host.clone()),
                                         opentelemetry::KeyValue::new("task.changed", changed),
                                         opentelemetry::KeyValue::new("task.failed", failed),
@@ -1201,7 +1354,7 @@ async fn run_app(
                                }
                            }
                        }
-                       Action::AskAi => {
+                        Action::AskAi => {
                            let client_opt = app.ai_client.clone();
                            let current_task_opt = app.current_task.clone();
                            let failed_task_opt = app.failed_task.clone();
@@ -1237,6 +1390,170 @@ async fn run_app(
                                }
                            }
                        }
+                        Action::SubmitChat => {
+                           let client_opt = app.ai_client.clone();
+                           if let Some(client) = client_opt {
+                               let input = app.chat_input.clone();
+                               if !input.trim().is_empty() {
+                                   app.chat_input.clear(); // Clear immediately
+
+                                   // [NEW] Command Aliases: dispatch IPC actions from chat
+                                   let lower = input.trim().to_lowercase();
+                                   match lower.as_str() {
+                                       "p" | "proceed" => {
+                                           if app.waiting_for_proceed {
+                                               app.waiting_for_proceed = false;
+                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "⏩ Proceeding...".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           } else {
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "Not waiting for proceed.".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           }
+                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                                       }
+                                       "c" | "continue" => {
+                                           if app.waiting_for_proceed {
+                                               app.waiting_for_proceed = false;
+                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Continue).await; }
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "▶️ Continuing (skip failed task)...".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           } else {
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "Not waiting for proceed.".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           }
+                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                                       }
+                                       "r" | "retry" => {
+                                           if app.waiting_for_proceed {
+                                               app.waiting_for_proceed = false;
+                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Retry).await; }
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "🔄 Retrying task...".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           } else {
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: "Not waiting for proceed.".to_string(),
+                                                   collapsed: false,
+                                               });
+                                           }
+                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                                       }
+                                       _ if input.starts_with('/') => {
+                                   // [NEW] Slash Commands
+                                   let parts: Vec<&str> = input.split_whitespace().collect();
+                                   match parts.first() {
+                                       Some(&"/model") => {
+                                           if parts.len() == 1 {
+                                               // List models with numbered selection
+                                               let models = client.list_models().await;
+                                               let mut list_str = String::from("Available Models:\n");
+                                               for (i, m) in models.iter().enumerate() {
+                                                   let marker = if *m == client.get_model() { " ← current" } else { "" };
+                                                   list_str.push_str(&format!("  {}. {}{}\n", i + 1, m, marker));
+                                               }
+                                               list_str.push_str("\nUse /model <name> to switch.");
+                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                   role: "system".to_string(),
+                                                   content: list_str,
+                                                   collapsed: false,
+                                               });
+                                           } else if let Some(model_name) = parts.get(1) {
+                                                // Set model
+                                                if let Some(app_client) = &mut app.ai_client {
+                                                    app_client.set_model(model_name);
+                                                    app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                                        role: "system".to_string(),
+                                                        content: format!("Switched to model: {}", model_name),
+                                                        collapsed: false,
+                                                    });
+                                                }
+                                           }
+                                       }
+                                       Some(&"/context") => {
+                                           // [NEW] Phase 31: Context Sharing
+                                           let context = ansible_piloteer::ai::AiClient::build_context_summary(
+                                               app.current_task.as_deref(),
+                                               app.task_vars.as_ref(),
+                                               app.failed_task.as_deref(),
+                                               app.failed_result.as_ref(),
+                                           );
+                                           app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                               role: "system".to_string(),
+                                               content: format!("📋 Current Context:\n\n{}", context),
+                                               collapsed: false,
+                                           });
+                                       }
+                                       Some(&"/help") => {
+                                           app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                               role: "system".to_string(),
+                                               content: "Chat Commands:\n\
+                                                   /model          — List available models\n\
+                                                   /model <name>   — Switch to a model\n\
+                                                   /context        — Show current task context\n\
+                                                   /help           — Show this help\n\
+                                                   \n\
+                                                   Quick Actions (type directly):\n\
+                                                   p / proceed     — Proceed to next task\n\
+                                                   c / continue    — Continue past failure\n\
+                                                   r / retry       — Retry failed task".to_string(),
+                                               collapsed: false,
+                                           });
+                                       }
+                                       _ => {
+                                            app.chat_history.push(ansible_piloteer::ai::ChatMessage {
+                                               role: "system".to_string(),
+                                               content: format!("Unknown command: {}. Type /help for available commands.", input),
+                                               collapsed: false,
+                                           });
+                                       }
+                                   }
+                                   // Scroll to bottom
+                                   app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+                                       }
+                                       _ => {
+                                       // Normal Chat Message
+                                       app.chat_loading = true;
+                                       // Add user message
+                                       let user_msg = ansible_piloteer::ai::ChatMessage {
+                                           role: "user".to_string(),
+                                           content: input,
+                                           collapsed: false,
+                                       };
+                                       app.chat_history.push(user_msg);
+                                       // Scroll to bottom
+                                       app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+
+                                       let history = app.chat_history.clone();
+                                       let tx = ai_tx.clone();
+
+                                       tokio::spawn(async move {
+                                           let res = client.chat(history).await;
+                                           let _ = tx.send(res).await;
+                                       });
+                                       }
+                                   }
+                               }
+                           } else {
+                                app.notification = Some(("AI Client not configured. Cannot send message.".to_string(), std::time::Instant::now()));
+                                app.log("SubmitChat Failed: AI Client is None".to_string(), Some(ratatui::style::Color::Red));
+                           }
+                        }
                        Action::ApplyFix => {
                            if let Some(analysis) = &app.suggestion
                                && let Some(fix) = &analysis.fix

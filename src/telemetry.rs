@@ -166,12 +166,17 @@ mod tests {
             secret_token: None,
             quota_limit_tokens: None,
             quota_limit_usd: None,
+            google_api_key: None,
             google_client_id: None,
             google_client_secret: None,
             zipkin_endpoint: None, // No endpoint = tracing disabled
             zipkin_service_name: "test".to_string(),
             zipkin_sample_rate: 1.0,
             filters: None, // [NEW]
+            provider: None,
+            anthropic_api_key: None,
+            vertex_project_id: None,
+            vertex_location: Some("us-central1".to_string()),
         };
 
         // Should succeed without initializing tracing

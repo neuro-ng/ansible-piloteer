@@ -1,0 +1,5 @@
+model = "gemini-flash-latest"
+provider = "google"
+
+[filters]
+count_all = "count(@)"

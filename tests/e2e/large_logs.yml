@@ -1,0 +1,9 @@
+---
+- name: Large Logs Stress Test
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Generate Large Output
+      debug:
+        msg: "{{ 'A' * 10000 }}"
+      loop: "{{ range(0, 100) | list }}"

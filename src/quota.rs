@@ -114,4 +114,19 @@ impl QuotaTracker {
 
         Ok(())
     }
+
+    pub fn time_until_reset(&self) -> std::time::Duration {
+        let now = Utc::now();
+        let tomorrow = now
+            .date_naive()
+            .succ_opt()
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let tomorrow_utc = DateTime::<Utc>::from_naive_utc_and_offset(tomorrow, Utc);
+        let duration = tomorrow_utc - now;
+        duration
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(0))
+    }
 }

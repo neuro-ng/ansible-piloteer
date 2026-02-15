@@ -26,7 +26,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .split(frame.area());
 
             draw_logs(frame, app, chunks[0]);
-            draw_inspector(frame, app, chunks[1]);
+
+            if app.chat_active {
+                crate::widgets::chat::draw_chat(frame, app, chunks[1]);
+            } else {
+                draw_inspector(frame, app, chunks[1]);
+            }
         }
     }
 

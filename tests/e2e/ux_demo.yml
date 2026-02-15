@@ -1,0 +1,38 @@
+---
+- name: UX Verification Demo
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    complex_data:
+      users:
+        - name: alice
+          roles: ["admin", "dev"]
+          meta:
+            login_count: 42
+            ssh_keys:
+              - "ssh-rsa AAA..."
+              - "ssh-ed25519 AAA..."
+        - name: bob
+          roles: ["user"]
+          meta:
+            login_count: 1
+  tasks:
+    - name: Rapid Log Generation
+      ansible.builtin.debug:
+        msg: "Log entry #{{ item }}"
+      loop: "{{ range(1, 101) | list }}"
+      loop_control:
+        label: "Item {{ item }}"
+
+    - name: Deep JSON Data
+      ansible.builtin.set_fact:
+        app_state: "{{ complex_data }}"
+
+    - name: Long Running Task (Heatmap)
+      ansible.builtin.command: sleep 5
+      changed_when: false
+
+    - name: Ignored Failure (UI State)
+      ansible.builtin.command: /bin/false
+      ignore_errors: true

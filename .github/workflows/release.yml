@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release Binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release
+        run: cargo build --release --verbose
+        env:
+          PILOTEER_GOOGLE_CLIENT_SECRET: ${{ secrets.PILOTEER_GOOGLE_CLIENT_SECRET }}
+          # Optional: Override Client ID if needed
+          # PILOTEER_GOOGLE_CLIENT_ID: ${{ secrets.PILOTEER_GOOGLE_CLIENT_ID }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: target/release/ansible-piloteer
+          generate_release_notes: true

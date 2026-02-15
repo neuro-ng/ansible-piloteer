@@ -29,6 +29,7 @@ pub enum Action {
     ToggleMetrics,     // [NEW] Phase 22
     ToggleMetricsView, // [NEW] Phase 22
     ToggleBreakpoint,  // [NEW] Phase 31
+    SubmitChat,        // [NEW] Phase 31
     None,
 }
 
@@ -144,6 +145,18 @@ pub struct App {
     pub ipc_tx: Option<mpsc::Sender<Message>>,
     pub client_connected: bool, // [NEW] Track active client connection
     pub unreachable_hosts: std::collections::HashSet<String>, // [NEW]
+
+    // AI Chat State [NEW] Phase 31
+    pub chat_active: bool,
+    pub chat_input: String,
+    pub chat_history: Vec<crate::ai::ChatMessage>,
+    pub chat_scroll: u16,
+    pub chat_loading: bool,
+    pub chat_mode: ChatMode,                // [NEW]
+    pub chat_selected_index: Option<usize>, // [NEW]
+    pub chat_search_query: String,          // [NEW]
+    pub chat_auto_scroll: bool,             // [NEW] Phase 34
+
     // Visual Mode State (Phase 16: Multi-Line Copy)
     pub visual_mode: bool,
     pub visual_start_index: Option<usize>,
@@ -197,11 +210,20 @@ pub enum MetricsView {
     Heatmap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChatMode {
+    Insert,
+    Normal,
+    Search,
+}
+
 impl App {
     pub fn new(config: Config) -> Self {
-        // Enable AI if Key is set OR if using a custom Base URL (e.g. Local LLM)
-        let enable_ai =
-            config.openai_api_key.is_some() || config.api_base != "https://api.openai.com/v1";
+        // Enable AI if Key is set OR if using a custom Base URL (e.g. Local LLM) OR if Auth Token / Google Provider is set
+        let enable_ai = config.openai_api_key.is_some()
+            || config.api_base != "https://api.openai.com/v1"
+            || config.auth_token.is_some()
+            || config.provider.as_deref() == Some("google");
 
         let ai_client = if enable_ai {
             Some(AiClient::new(config.clone()))
@@ -253,6 +275,17 @@ impl App {
             metrics_view: MetricsView::Dashboard, // [NEW] Phase 22
             test_script: Vec::new(),              // [NEW] Phase 27
             unreachable_hosts: std::collections::HashSet::new(),
+
+            chat_active: false,
+            chat_input: String::new(),
+            chat_history: Vec::new(),
+            chat_scroll: 0,
+            chat_loading: false,
+            chat_mode: ChatMode::Insert,      // [NEW]
+            chat_selected_index: None,        // [NEW]
+            chat_search_query: String::new(), // [NEW]
+            chat_auto_scroll: true,           // [NEW] Phase 34
+
             // Visual Mode State
             visual_mode: false,
             visual_start_index: None,
@@ -334,9 +367,229 @@ impl App {
         if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Press {
                 // Toggle help
-                if key.code == KeyCode::Char('?') {
+                if key.code == KeyCode::Char('?') && !self.chat_active {
                     self.show_help = !self.show_help;
                     return Action::None;
+                }
+
+                // [NEW] Chat Input Handling
+                if self.chat_active {
+                    match self.chat_mode {
+                        ChatMode::Insert => match key.code {
+                            KeyCode::Esc => {
+                                self.chat_mode = ChatMode::Normal;
+                                self.chat_selected_index =
+                                    Some(self.chat_history.len().saturating_sub(1));
+                                return Action::None;
+                            }
+                            KeyCode::Enter => {
+                                if !self.chat_input.trim().is_empty() {
+                                    return Action::SubmitChat;
+                                }
+                                return Action::None;
+                            }
+                            KeyCode::Char(c) => {
+                                self.chat_input.push(c);
+                                return Action::None;
+                            }
+                            KeyCode::Backspace => {
+                                self.chat_input.pop();
+                                return Action::None;
+                            }
+                            // [NEW] Phase 34: Scroll in Insert mode
+                            KeyCode::Up
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                            {
+                                self.chat_auto_scroll = false;
+                                self.chat_scroll = self.chat_scroll.saturating_sub(1);
+                                return Action::None;
+                            }
+                            KeyCode::Down
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                            {
+                                self.chat_scroll = self.chat_scroll.saturating_add(1);
+                                return Action::None;
+                            }
+                            KeyCode::PageUp
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                            {
+                                self.chat_auto_scroll = false;
+                                self.chat_scroll = self.chat_scroll.saturating_sub(10);
+                                return Action::None;
+                            }
+                            KeyCode::PageDown
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                            {
+                                self.chat_scroll = self.chat_scroll.saturating_add(10);
+                                return Action::None;
+                            }
+                            _ => return Action::None,
+                        },
+                        ChatMode::Normal => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    self.chat_active = false;
+                                    self.chat_mode = ChatMode::Insert; // Reset for next time
+                                    return Action::None;
+                                }
+                                KeyCode::Char('i') | KeyCode::Enter => {
+                                    self.chat_mode = ChatMode::Insert;
+                                    self.chat_selected_index = None;
+                                    return Action::None;
+                                }
+                                KeyCode::Char('/') => {
+                                    self.chat_mode = ChatMode::Search;
+                                    self.chat_search_query.clear();
+                                    return Action::None;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if !self.chat_history.is_empty() {
+                                        let idx = self.chat_selected_index.unwrap_or(0);
+                                        if idx < self.chat_history.len() - 1 {
+                                            self.chat_selected_index = Some(idx + 1);
+                                            // TODO: adjust scroll to keep selection in view?
+                                            // For now, simple scroll logic in widget or here?
+                                            // Let's rely on widget to center selection if possible, or manual scroll.
+                                            if (idx + 1) as u16 >= self.chat_scroll + 10 {
+                                                // simplistic assumption of height
+                                                self.chat_scroll =
+                                                    self.chat_scroll.saturating_add(1);
+                                            }
+                                        }
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if !self.chat_history.is_empty() {
+                                        self.chat_auto_scroll = false; // [NEW] Phase 34
+                                        let idx = self.chat_selected_index.unwrap_or(0);
+                                        if idx > 0 {
+                                            self.chat_selected_index = Some(idx - 1);
+                                            if (idx - 1) as u16 + 2 < self.chat_scroll {
+                                                self.chat_scroll =
+                                                    self.chat_scroll.saturating_sub(1);
+                                            }
+                                        }
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::Char(' ') => {
+                                    // Space to toggle collapse
+                                    if let Some(idx) = self.chat_selected_index {
+                                        if let Some(msg) = self.chat_history.get_mut(idx) {
+                                            msg.collapsed = !msg.collapsed;
+                                        }
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::Char('y') => {
+                                    if let Some(idx) = self.chat_selected_index {
+                                        if let Some(msg) = self.chat_history.get(idx) {
+                                            let content = msg.content.clone();
+                                            if let Err(e) = self.clipboard.set_text(content) {
+                                                self.notification = Some((
+                                                    format!("Copy Failed: {}", e),
+                                                    std::time::Instant::now(),
+                                                ));
+                                            } else {
+                                                self.notification = Some((
+                                                    "Copied message to clipboard".to_string(),
+                                                    std::time::Instant::now(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::PageUp => {
+                                    self.chat_auto_scroll = false; // [NEW] Phase 34
+                                    self.chat_scroll = self.chat_scroll.saturating_sub(10);
+                                    return Action::None;
+                                }
+                                KeyCode::PageDown => {
+                                    self.chat_scroll = self.chat_scroll.saturating_add(10);
+                                    return Action::None;
+                                }
+                                KeyCode::Home => {
+                                    self.chat_auto_scroll = false; // [NEW] Phase 34
+                                    self.chat_scroll = 0;
+                                    if !self.chat_history.is_empty() {
+                                        self.chat_selected_index = Some(0);
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::End => {
+                                    self.chat_auto_scroll = true; // [NEW] Phase 34
+                                    self.chat_scroll =
+                                        self.chat_history.len().saturating_sub(1) as u16;
+                                    if !self.chat_history.is_empty() {
+                                        self.chat_selected_index =
+                                            Some(self.chat_history.len() - 1);
+                                    }
+                                    return Action::None;
+                                }
+                                _ => return Action::None,
+                            }
+                        }
+                        ChatMode::Search => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    self.chat_mode = ChatMode::Normal;
+                                    self.chat_search_query.clear();
+                                    return Action::None;
+                                }
+                                KeyCode::Enter => {
+                                    // Search logic handled in widget/draw mostly?
+                                    // No, we should probably find the NEXT match here or just stay in search mode highlighting matches?
+                                    // Let's stay in search mode but maybe cycle matches if they exist?
+                                    // For now, Enter just confirms search and goes back to Normal?
+                                    // Or Enter cycles next match?
+                                    // Let's make Enter go back to Normal with filtered view? No, we want highlight.
+                                    // Let's makes Enter just keep mode but maybe move selection to first match.
+
+                                    // Find first match after current selection
+                                    let query = self.chat_search_query.to_lowercase();
+                                    if !query.is_empty() {
+                                        let start_idx = self.chat_selected_index.unwrap_or(0);
+                                        let found = self
+                                            .chat_history
+                                            .iter()
+                                            .enumerate()
+                                            .skip(start_idx + 1)
+                                            .find(|(_, m)| {
+                                                m.content.to_lowercase().contains(&query)
+                                            })
+                                            .or_else(|| {
+                                                // Wrap around
+                                                self.chat_history
+                                                    .iter()
+                                                    .enumerate()
+                                                    .take(start_idx + 1)
+                                                    .find(|(_, m)| {
+                                                        m.content.to_lowercase().contains(&query)
+                                                    })
+                                            });
+
+                                        if let Some((idx, _)) = found {
+                                            self.chat_selected_index = Some(idx);
+                                            // Auto-scroll to match
+                                            self.chat_scroll = idx.saturating_sub(5) as u16; // Center roughly
+                                        }
+                                    }
+                                    return Action::None;
+                                }
+                                KeyCode::Char(c) => {
+                                    self.chat_search_query.push(c);
+                                    return Action::None;
+                                }
+                                KeyCode::Backspace => {
+                                    self.chat_search_query.pop();
+                                    return Action::None;
+                                }
+                                _ => return Action::None,
+                            }
+                        }
+                    }
                 }
 
                 // [NEW] Variable Selection Logic
@@ -785,6 +1038,10 @@ impl App {
                         self.find_prev_match();
                         return Action::PrevMatch;
                     }
+                    KeyCode::Char('C') => {
+                        self.chat_active = !self.chat_active;
+                        return Action::None;
+                    }
                     _ => {} // Default for this match block
                 }
 
@@ -881,10 +1138,19 @@ impl App {
         } else if let Event::Mouse(mouse) = event {
             match mouse.kind {
                 crossterm::event::MouseEventKind::ScrollDown => {
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    if self.chat_active {
+                        self.chat_scroll = self.chat_scroll.saturating_add(3);
+                    } else {
+                        self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    }
                 }
                 crossterm::event::MouseEventKind::ScrollUp => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    if self.chat_active {
+                        self.chat_auto_scroll = false;
+                        self.chat_scroll = self.chat_scroll.saturating_sub(3);
+                    } else {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    }
                 }
                 _ => {}
             }
@@ -1297,7 +1563,6 @@ mod tests_app {
     #[test]
     fn test_update_velocity() {
         let config = crate::config::Config {
-            // Correct Fields from src/config.rs
             openai_api_key: None,
             socket_path: "/tmp/piloteer.sock".to_string(),
             model: "gpt-4".to_string(),
@@ -1308,6 +1573,7 @@ mod tests_app {
             secret_token: None,
             quota_limit_tokens: None,
             quota_limit_usd: None,
+            google_api_key: None,
             google_client_id: None,
             google_client_secret: None,
             zipkin_endpoint: None,
@@ -1315,6 +1581,9 @@ mod tests_app {
             zipkin_sample_rate: 1.0,
             filters: None,
             provider: None,
+            anthropic_api_key: None,
+            vertex_project_id: None,
+            vertex_location: Some("us-central1".to_string()),
         };
 
         let mut app = App::new(config);
@@ -1361,6 +1630,7 @@ mod tests_app {
             secret_token: None,
             quota_limit_tokens: None,
             quota_limit_usd: None,
+            google_api_key: None,
             google_client_id: None,
             google_client_secret: None,
             zipkin_endpoint: None,
@@ -1368,6 +1638,9 @@ mod tests_app {
             zipkin_sample_rate: 1.0,
             filters: None,
             provider: None,
+            anthropic_api_key: None,
+            vertex_project_id: None,
+            vertex_location: Some("us-central1".to_string()),
         };
 
         let mut app = App::new(config);
@@ -1400,6 +1673,7 @@ mod tests_app {
             secret_token: None,
             quota_limit_tokens: None,
             quota_limit_usd: None,
+            google_api_key: None,
             google_client_id: None,
             google_client_secret: None,
             zipkin_endpoint: None,
@@ -1407,6 +1681,9 @@ mod tests_app {
             zipkin_sample_rate: 1.0,
             filters: None,
             provider: None,
+            anthropic_api_key: None,
+            vertex_project_id: None,
+            vertex_location: Some("us-central1".to_string()),
         };
 
         let mut app = App::new(config);
@@ -1448,6 +1725,7 @@ mod tests_app {
             secret_token: None,
             quota_limit_tokens: None,
             quota_limit_usd: None,
+            google_api_key: None,
             google_client_id: None,
             google_client_secret: None,
             zipkin_endpoint: None,
@@ -1455,6 +1733,9 @@ mod tests_app {
             zipkin_sample_rate: 1.0,
             filters: None,
             provider: None,
+            anthropic_api_key: None,
+            vertex_project_id: None,
+            vertex_location: Some("us-central1".to_string()),
         };
         let mut app = App::new(config);
 

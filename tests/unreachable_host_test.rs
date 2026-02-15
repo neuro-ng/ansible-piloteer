@@ -14,6 +14,7 @@ fn create_test_config() -> Config {
         secret_token: None,
         quota_limit_tokens: None,
         quota_limit_usd: None,
+        google_api_key: None,
         google_client_id: None,
         google_client_secret: None,
         zipkin_endpoint: None,
@@ -21,6 +22,9 @@ fn create_test_config() -> Config {
         zipkin_sample_rate: 1.0,
         filters: None,
         provider: None,
+        anthropic_api_key: None,
+        vertex_project_id: None,
+        vertex_location: Some("us-central1".to_string()),
     })
 }
 

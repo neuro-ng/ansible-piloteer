@@ -156,7 +156,7 @@ impl IpcConnection {
 
     pub async fn send(&mut self, msg: &Message) -> Result<()> {
         let mut span =
-            crate::tracing::start_span("ipc.send", opentelemetry::trace::SpanKind::Producer);
+            crate::telemetry::start_span("ipc.send", opentelemetry::trace::SpanKind::Producer);
 
         let result: Result<()> = async {
             let mut json = serde_json::to_string(msg)?;
@@ -168,7 +168,7 @@ impl IpcConnection {
         .await;
 
         if let Err(e) = &result {
-            crate::tracing::record_error_on_span(&mut span, &e.to_string());
+            crate::telemetry::record_error_on_span(&mut span, &e.to_string());
         }
         span.end();
         result
@@ -176,7 +176,7 @@ impl IpcConnection {
 
     pub async fn receive(&mut self) -> Result<Option<Message>> {
         let mut span =
-            crate::tracing::start_span("ipc.receive", opentelemetry::trace::SpanKind::Consumer);
+            crate::telemetry::start_span("ipc.receive", opentelemetry::trace::SpanKind::Consumer);
 
         let result: Result<Option<Message>> = async {
             let mut reader = BufReader::new(&mut self.stream);
@@ -190,7 +190,7 @@ impl IpcConnection {
         .await;
 
         if let Err(e) = &result {
-            crate::tracing::record_error_on_span(&mut span, &e.to_string());
+            crate::telemetry::record_error_on_span(&mut span, &e.to_string());
         }
         span.end();
         result

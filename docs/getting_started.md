@@ -52,28 +52,30 @@ You can set this up via environment variables for a specific run, or in your `an
 If you plan to use hosted AI features that require authentication, you can log in using your Google account.
 
 **Prerequisites:**
-You can use the built-in default credentials (mimicking GCloud CLI) for a quick start, OR provide your own Google OAuth 2.0 Client credentials if you need specific scopes or quotas.
+Reliable usage requires creating your own **Google OAuth 2.0 Desktop App** credentials. The default credentials may be revoked or rate-limited.
 
-1.  **Run Login (Quick Start)**:
-    ```bash
-    ./target/release/ansible-piloteer auth login
-    ```
-    *This uses the default public Client ID. It is convenient for testing.*
+**How to Create Credentials:**
+1.  Go to the [Google Cloud Console Credentials Page](https://console.cloud.google.com/apis/credentials).
+2.  Click **Create Credentials** -> **OAuth client ID**.
+3.  Select Application type: **Desktop app**.
+4.  Name it "Ansible Piloteer".
+5.  Add **Authorized Redirect URI**: `http://localhost:8085`.
+6.  Click **Create** and copy your **Client ID** and **Client Secret**.
 
-2.  **Optional: Configure Custom Credentials**:
-    *   **Option A (Env Vars)**:
-        ```bash
-        export PILOTEER_GOOGLE_CLIENT_ID="your-client-id"
-        export PILOTEER_GOOGLE_CLIENT_SECRET="your-client-secret"
-        ```
-    *   **Option B (Config File)**: Add to `~/.config/ansible-piloteer/piloteer.toml`:
-        ```toml
-        google_client_id = "your-client-id"
-        google_client_secret = "your-client-secret"
-        ```
+**Configure Piloteer:**
+You can pass these credentials via environment variables or strictly in the config file.
 
-3.  The login command will open your browser. Sign in and authorize the application.
-4.  Once successful, the token is saved to `~/.config/ansible-piloteer/auth.json`.
+```bash
+export PILOTEER_GOOGLE_CLIENT_ID="your-new-client-id"
+export PILOTEER_GOOGLE_CLIENT_SECRET="your-new-client-secret"
+```
+
+**Login:**
+```bash
+./target/release/ansible-piloteer auth login
+```
+
+Once successful, the token is saved to `~/.config/ansible-piloteer/auth.json`.
 
 ### Method A: Environment Variables (Quick Start)
 

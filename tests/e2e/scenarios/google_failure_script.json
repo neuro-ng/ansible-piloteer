@@ -1,0 +1,14 @@
+[
+    {
+        "task_name": "Trigger Google AI",
+        "on_failure": true,
+        "actions": [
+            "AskAi",
+            {
+                "AssertAiContext": {
+                    "contains": "Real Google Client Analysis"
+                }
+            }
+        ]
+    }
+]
