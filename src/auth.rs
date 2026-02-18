@@ -12,10 +12,6 @@ use tokio::net::TcpListener;
 use url::Url;
 
 // Default credentials (mimicking gcloud for "out of the box" experience)
-// Default credentials (mimicking gcloud for "out of the box" experience)
-// Default credentials (mimicking user provided ID)
-// Default credentials (mimicking user provided ID)
-// Using option_env! to inject secrets at compile time for release builds
 // Default credentials (mimicking user provided ID)
 // Using option_env! to inject secrets at compile time for release builds
 const DEFAULT_CLIENT_ID: &str = if let Some(id) = option_env!("PILOTEER_GOOGLE_CLIENT_ID") {

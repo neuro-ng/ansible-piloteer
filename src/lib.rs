@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod ai;
 pub mod app;
 pub mod auth;
@@ -5,7 +6,9 @@ pub mod clipboard;
 pub mod config;
 pub mod execution;
 pub mod highlight;
+pub mod input;
 pub mod ipc;
+pub mod ipc_handler;
 pub mod mcp;
 pub mod query;
 pub mod quota;

@@ -1,36 +1,28 @@
-use ansible_piloteer::{app, auth, config, ui};
+use ansible_piloteer::{actions, auth, ipc_handler, ui};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use crossterm::{
-    event::{self},
-    execute,
-};
-use ratatui::{Terminal, backend::CrosstermBackend};
+use crossterm::event;
+use crossterm::execute;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
-use std::process::Command;
-use std::time::{Duration, Instant}; // [MODIFY]
-// use tokio::net::TcpListener; // Unused for now
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use ansible_piloteer::app::{Action, ActiveView, App, TaskHistory};
+use ansible_piloteer::app::{App, TaskHistory};
 use ansible_piloteer::config::Config;
-use ansible_piloteer::ipc::{IpcServer, Message}; // Explicit use
-use ansible_piloteer::widgets::json_tree::JsonTreeState; // [NEW]
+use ansible_piloteer::ipc::Message;
 
 type DefaultTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(
     name = "ansible-piloteer",
     about = "AI-powered Ansible interactive debugger",
-    long_about = "Ansible Piloteer is an interactive terminal interface for Ansible playbooks.
-It allows you to step through tasks, inspect variables, and use AI to diagnose and fix errors on the fly.
-
-This tool acts as a controller that communicates with a custom Ansible Strategy Plugin.",
     after_help = "
+
 EXAMPLES:
   # Run a playbook (Standard Mode)
   ansible-piloteer my_playbook.yml
@@ -130,31 +122,34 @@ DISTRIBUTED MODE:
 "
 )]
 struct Cli {
-    /// Arguments to forward to ansible-playbook
+    /// Arguments forwarded to ansible-playbook
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     ansible_args: Vec<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
-    /// Export execution report to file (JSON or Markdown)
+
+    /// Export execution report (.json or .md)
     #[arg(long)]
     report: Option<String>,
+
     /// Bind address for TCP listener (e.g. 0.0.0.0:9000)
     #[arg(long)]
     bind: Option<String>,
+
     /// Shared secret token for authentication
     #[arg(long)]
     secret: Option<String>,
 
-    /// Verbosity level (-v, -vv, -vvv, etc.)
+    /// Verbosity level (-v, -vv, -vvv, …)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Automatically analyze, fix, and retry failed tasks in headless mode
+    /// Automatically analyze and retry failed tasks (headless)
     #[arg(long)]
     auto_analyze: bool,
 
-    /// Replay a saved session file (offline mode)
+    /// Replay a saved session file
     #[arg(long)]
     replay: Option<String>,
 }
@@ -166,283 +161,60 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
-    /// Query session data using JMESPath. If query is omitted, enters interactive REPL mode.
+    /// Query session data with JMESPath (omit query for interactive REPL)
     Query {
-        /// JMESPath query expression (optional)
         query: Option<String>,
-        /// Path to input session file (e.g., session.json.gz)
         #[arg(short, long)]
         input: String,
-        /// Output format: json, yaml, pretty-json
         #[arg(short, long, default_value = "pretty-json")]
         format: String,
     },
-    /// Start MCP stdio server for Antigravity IDE integration
+    /// Start MCP stdio server for IDE integration
     Mcp,
 }
 
 #[derive(Subcommand)]
 enum AuthCmd {
     Login {
-        /// Profile name (default: "default")
         #[arg(long, default_value = "default")]
         profile: String,
-
-        /// Backend provider (default: "google")
         #[arg(long, default_value = "google")]
         backend: String,
     },
-    /// Authenticate using gcloud Application Default Credentials
     Gcloud {
-        /// Profile name (default: "default")
         #[arg(long, default_value = "default")]
         profile: String,
     },
-    /// Authenticate using ADC file directly (for IDE environments like Antigravity)
     Adc {
-        /// Profile name (default: "default")
         #[arg(long, default_value = "default")]
         profile: String,
     },
-    /// List configured authentication profiles
     List,
 }
+
+// ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let auto_analyze = cli.auto_analyze;
 
-    // Load config early for tracing initialization
     let config = Config::new().unwrap_or_else(|e| {
         eprintln!("Failed to load config: {}", e);
         std::process::exit(1);
     });
 
-    // Initialize tracing if configured
     if let Err(e) = ansible_piloteer::telemetry::init_tracing(&config) {
         eprintln!("Warning: Failed to initialize tracing: {}", e);
     }
 
     let result = match cli.command {
-        Some(Commands::Auth { cmd }) => match cmd {
-            AuthCmd::Login { profile, backend } => {
-                // If credentials are provided in config, use them. Otherwise pass None to use built-in defaults.
-                let (client_id, client_secret) =
-                    (config.google_client_id, config.google_client_secret);
-
-                if client_id.is_none() {
-                    println!(
-                        "No Google OAuth credentials found in config. Using default GCloud credentials."
-                    );
-                    println!("⚠️  WARNING: Default credentials do NOT support user-based billing.");
-                    println!(
-                        "   To enable billing against your own Google Cloud project, you must set:"
-                    );
-                    println!("   export PILOTEER_GOOGLE_CLIENT_ID='...'");
-                    println!("   export PILOTEER_GOOGLE_CLIENT_SECRET='...'");
-                }
-
-                if backend != "google" {
-                    eprintln!("Currently only 'google' backend supports OAuth login.");
-                    std::process::exit(1);
-                }
-
-                println!(
-                    "Starting Google OAuth login flow for profile: '{}'...",
-                    profile
-                );
-                println!(
-                    "NOTE: If running remotely, ensure you tunnel port 8085 to your local machine:"
-                );
-                println!("      ssh -L 8085:localhost:8085 user@remote-host");
-
-                match auth::login(client_id, client_secret).await {
-                    Ok(token) => {
-                        println!("Login successful!");
-                        if let Err(e) = Config::save_auth_token(&profile, &backend, &token) {
-                            eprintln!("Failed to save auth token: {}", e);
-                        } else {
-                            println!("Token saved to profile '{}'.", profile);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("\n❌ Login Failed: {:?}", e);
-
-                        let err_str = e.to_string();
-                        if err_str.contains("invalid_client")
-                            || err_str.contains("Unauthorized")
-                            || err_str.contains("OAuth Server Error")
-                        {
-                            println!(
-                                "\n⚠️  The default Google Cloud credentials may be invalid or revoked."
-                            );
-                            println!(
-                                "   To fix this, please create your own OAuth Desktop App credentials:"
-                            );
-                        }
-                    }
-                }
-                Ok(())
-            }
-            AuthCmd::Gcloud { profile } => {
-                println!("Fetching token from gcloud Application Default Credentials...");
-                println!("If not authenticated, run: gcloud auth application-default login");
-                match auth::get_gcloud_token().await {
-                    Ok(token) => {
-                        println!("✅ Token acquired from gcloud!");
-                        if let Err(e) = Config::save_auth_token(&profile, "google", &token) {
-                            eprintln!("Failed to save auth token: {}", e);
-                        } else {
-                            println!(
-                                "Token saved to profile '{}'. You can now use Google/Vertex AI.",
-                                profile
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("\n❌ gcloud auth failed: {:?}", e);
-                        println!("\nTo authenticate with gcloud:");
-                        println!("  1. gcloud auth application-default login");
-                        println!("  2. piloteer auth gcloud");
-                    }
-                }
-                Ok(())
-            }
-            AuthCmd::Adc { profile } => {
-                println!("Reading Application Default Credentials file...");
-                match auth::get_adc_token().await {
-                    Ok(token) => {
-                        println!("✅ Token acquired from ADC file!");
-                        if let Err(e) = Config::save_auth_token(&profile, "google", &token) {
-                            eprintln!("Failed to save auth token: {}", e);
-                        } else {
-                            println!(
-                                "Token saved to profile '{}'. You can now use Google/Vertex AI.",
-                                profile
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("\n❌ ADC auth failed: {:?}", e);
-                        println!("\nTo set up ADC credentials:");
-                        println!("  1. gcloud auth application-default login");
-                        println!("  2. piloteer auth adc");
-                        println!(
-                            "\nOr set GOOGLE_APPLICATION_CREDENTIALS to your service account key."
-                        );
-                    }
-                }
-                Ok(())
-            }
-            AuthCmd::List => {
-                let data = Config::load_auth_data().unwrap_or_default();
-                if data.is_empty() {
-                    println!("No cached credentials found.");
-                    return Ok(());
-                }
-
-                println!(
-                    "{:<15} | {:<10} | {:<40}",
-                    "Profile", "Backend", "Token (Masked)"
-                );
-                println!("{:-<15}-+-{:-<10}-+-{:-<40}", "", "", "");
-
-                for (profile, backends) in data {
-                    for (backend, token) in backends {
-                        let masked_token = if token.len() > 8 {
-                            format!("{}...{}", &token[..4], &token[token.len() - 4..])
-                        } else {
-                            "****".to_string()
-                        };
-                        println!("{:<15} | {:<10} | {:<40}", profile, backend, masked_token);
-                    }
-                }
-                Ok(())
-            }
-        },
+        Some(Commands::Auth { cmd }) => handle_auth(cmd, config).await,
         Some(Commands::Query {
             query,
             input,
             format,
-        }) => {
-            let session = match ansible_piloteer::session::Session::load(&input) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Error loading session from {}: {}", input, e);
-                    std::process::exit(1);
-                }
-            };
-
-            if let Some(q) = query {
-                // One-off query mode
-                let json_string = match serde_json::to_string(&session) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Error serializing session: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-
-                let mut runtime = jmespath::Runtime::new();
-                runtime.register_builtin_functions();
-                ansible_piloteer::query::register_functions(&mut runtime);
-
-                // Register user-defined filters
-                if let Some(filters) = &config.filters {
-                    for (name, expr) in filters {
-                        runtime.register_function(
-                            name,
-                            Box::new(ansible_piloteer::query::CustomFilter::new(expr.clone())),
-                        );
-                    }
-                }
-
-                let expr = match runtime.compile(&q) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("Invalid JMESPath query: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-
-                // jmespath::Variable::from_json parses a JSON string into a Variable
-                let variable = jmespath::Variable::from_json(&json_string).unwrap_or_else(|e| {
-                    eprintln!("Error parsing JSON for JMESPath: {}", e);
-                    std::process::exit(1);
-                });
-
-                let result = match expr.search(&variable) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("JMESPath execution error: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-
-                match format.as_str() {
-                    "json" => println!("{}", serde_json::to_string(&result).unwrap()),
-                    "pretty-json" => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
-                    "yaml" => {
-                        println!("{}", serde_yaml::to_string(&result).unwrap());
-                    }
-                    _ => {
-                        eprintln!(
-                            "Unknown format: {}. Supported: json, pretty-json, yaml",
-                            format
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                // Interactive REPL mode
-                if let Err(e) = ansible_piloteer::repl::run(&session, config.filters.as_ref()) {
-                    eprintln!("REPL Error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            Ok(())
-        }
+        }) => handle_query(query, input, format, config),
         Some(Commands::Mcp) => ansible_piloteer::mcp::run_stdio_server(),
         None => {
             run_tui(
@@ -458,11 +230,121 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Shutdown tracing and flush pending spans
     ansible_piloteer::telemetry::shutdown_tracing();
-
     result
 }
+
+// ── Subcommand handlers ──────────────────────────────────────────────────────
+
+async fn handle_auth(cmd: AuthCmd, config: Config) -> Result<()> {
+    match cmd {
+        AuthCmd::Login { profile, backend } => {
+            if backend != "google" {
+                eprintln!("Only 'google' backend supports OAuth login.");
+                std::process::exit(1);
+            }
+            println!("Starting Google OAuth login for profile '{}'...", profile);
+            match auth::login(config.google_client_id, config.google_client_secret).await {
+                Ok(token) => save_token(&profile, &backend, &token),
+                Err(e) => eprintln!("Login Failed: {:?}", e),
+            }
+        }
+        AuthCmd::Gcloud { profile } => {
+            println!("Fetching token from gcloud ADC...");
+            match auth::get_gcloud_token().await {
+                Ok(token) => save_token(&profile, "google", &token),
+                Err(e) => eprintln!("gcloud auth failed: {:?}", e),
+            }
+        }
+        AuthCmd::Adc { profile } => {
+            println!("Reading Application Default Credentials file...");
+            match auth::get_adc_token().await {
+                Ok(token) => save_token(&profile, "google", &token),
+                Err(e) => eprintln!("ADC auth failed: {:?}", e),
+            }
+        }
+        AuthCmd::List => {
+            let data = Config::load_auth_data().unwrap_or_default();
+            if data.is_empty() {
+                println!("No cached credentials found.");
+                return Ok(());
+            }
+            println!(
+                "{:<15} | {:<10} | {:<40}",
+                "Profile", "Backend", "Token (Masked)"
+            );
+            println!("{:-<15}-+-{:-<10}-+-{:-<40}", "", "", "");
+            for (profile, backends) in data {
+                for (backend, token) in backends {
+                    let masked = if token.len() > 8 {
+                        format!("{}...{}", &token[..4], &token[token.len() - 4..])
+                    } else {
+                        "****".to_string()
+                    };
+                    println!("{:<15} | {:<10} | {:<40}", profile, backend, masked);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_token(profile: &str, backend: &str, token: &str) {
+    match Config::save_auth_token(profile, backend, token) {
+        Ok(_) => println!("Token saved to profile '{}'.", profile),
+        Err(e) => eprintln!("Failed to save auth token: {}", e),
+    }
+}
+
+fn handle_query(
+    query: Option<String>,
+    input: String,
+    format: String,
+    config: Config,
+) -> Result<()> {
+    let session = ansible_piloteer::session::Session::load(&input)
+        .map_err(|e| anyhow::anyhow!("Error loading session from {}: {}", input, e))?;
+
+    let Some(q) = query else {
+        ansible_piloteer::repl::run(&session, config.filters.as_ref())
+            .map_err(|e| anyhow::anyhow!("REPL Error: {}", e))?;
+        return Ok(());
+    };
+
+    let json_string = serde_json::to_string(&session)?;
+    let mut runtime = jmespath::Runtime::new();
+    runtime.register_builtin_functions();
+    ansible_piloteer::query::register_functions(&mut runtime);
+    if let Some(filters) = &config.filters {
+        for (name, expr) in filters {
+            runtime.register_function(
+                name,
+                Box::new(ansible_piloteer::query::CustomFilter::new(expr.clone())),
+            );
+        }
+    }
+    let expr = runtime
+        .compile(&q)
+        .map_err(|e| anyhow::anyhow!("Invalid query: {}", e))?;
+    let variable = jmespath::Variable::from_json(&json_string)
+        .map_err(|e| anyhow::anyhow!("Error parsing JSON: {}", e))?;
+    let result = expr
+        .search(&variable)
+        .map_err(|e| anyhow::anyhow!("JMESPath error: {}", e))?;
+
+    match format.as_str() {
+        "json" => println!("{}", serde_json::to_string(&result).unwrap()),
+        "pretty-json" => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+        "yaml" => println!("{}", serde_yaml::to_string(&result).unwrap()),
+        other => anyhow::bail!(
+            "Unknown format: {}. Supported: json, pretty-json, yaml",
+            other
+        ),
+    }
+    Ok(())
+}
+
+// ── TUI runner ───────────────────────────────────────────────────────────────
 
 async fn run_tui(
     ansible_args: Vec<String>,
@@ -475,20 +357,10 @@ async fn run_tui(
 ) -> Result<()> {
     let headless = std::env::var("PILOTEER_HEADLESS").is_ok();
 
-    // Load Config
-    let mut config = match crate::config::Config::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to load config: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if !ansible_args.is_empty() {
-        println!("Ansible arguments: {:?}", ansible_args);
-    }
-
-    // Override config with CLI args
+    let mut config = Config::new().unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {}", e);
+        std::process::exit(1);
+    });
     if let Some(addr) = bind_addr {
         config.bind_addr = Some(addr);
     }
@@ -496,298 +368,158 @@ async fn run_tui(
         config.secret_token = Some(secret);
     }
 
-    // Setup Terminal if not headless
-    // Setup Terminal if not headless
-    let mut terminal = if !headless {
-        let terminal = ratatui::init();
+    let mut terminal: Option<DefaultTerminal> = if !headless {
+        let t = ratatui::init();
         execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
-        Some(terminal)
+        Some(t)
     } else {
         println!("Running in HEADLESS mode");
         None
     };
 
-    // App State
-    let mut app = if let Some(r_path) = &replay_path {
-        println!("Loading session from {}...", r_path);
-        match App::from_session(r_path) {
-            Ok(loaded_app) => loaded_app,
-            Err(e) => {
-                eprintln!("Failed to load session: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        App::new(config.clone())
+    let mut app = match &replay_path {
+        Some(path) => App::from_session(path).unwrap_or_else(|e| {
+            eprintln!("Failed to load session: {}", e);
+            std::process::exit(1);
+        }),
+        None => App::new(config.clone()),
     };
-
-    let socket_path = config.socket_path.clone();
-    let bind_addr = config.bind_addr.clone();
-    let secret_token = config.secret_token.clone();
-
-    // Load test script if environment variable is set
     app.load_test_script();
 
-    let (to_app_tx, mut to_app_rx) = mpsc::channel::<Message>(100);
-    let (from_app_tx, mut from_app_rx) = mpsc::channel::<Message>(100);
-
-    // Only start IPC if NOT in replay mode
     if !app.replay_mode {
-        app.set_ipc_tx(Some(from_app_tx.clone()));
+        let (to_app_tx, to_app_rx) = mpsc::channel::<Message>(100);
+        let (from_app_tx, from_app_rx) = mpsc::channel::<Message>(100);
+        app.set_ipc_tx(Some(from_app_tx));
 
-        // Spawn IPC Server Task
-        tokio::spawn(async move {
-            // Start Server
-            // In real app, socket path might be dynamic or configured
-            let server = match IpcServer::new(&socket_path, bind_addr.as_deref()).await {
-                Ok(s) => s,
-                Err(e) => {
-                    // Log error through a side channel if possible, or panic
-                    eprintln!("Failed to start IPC: {}", e);
-                    return;
-                }
-            };
+        ipc_handler::spawn_ipc_server(
+            config.socket_path.clone(),
+            config.bind_addr.clone(),
+            config.secret_token.clone(),
+            to_app_tx,
+            from_app_rx,
+        );
 
-            // Log Server Start
-            {
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open("/tmp/piloteer_debug.log")
-                    .expect("Failed to open /tmp/piloteer_debug.log");
-                writeln!(f, "DEBUG: IPC Task Started").expect("Failed to write to log");
-            }
-
-            loop {
-                match server.accept().await {
-                    Ok(mut conn) => {
-                        // Log connection
-                        {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .append(true)
-                                .open("/tmp/piloteer_debug.log")
-                            {
-                                writeln!(f, "DEBUG: IPC Connection Accepted").ok();
-                            }
-                        }
-
-                        let mut connected = true;
-                        while connected {
-                            tokio::select! {
-                                // Receive from Ansible
-                                incoming = conn.receive() => {
-                                    match incoming {
-                                        Ok(Some(msg)) => {
-                                            // Handle Handshake
-                                            if let Message::Handshake { token } = &msg {
-                                                let authorized = match &secret_token {
-                                                    Some(expected) => token.as_deref() == Some(expected),
-                                                    None => true,
-                                                };
-
-                                                if !authorized {
-                                                    eprintln!("Authentication Failed: Invalid Token");
-                                                    break; // Break inner loop
-                                                }
-                                                let _ = to_app_tx.send(Message::Handshake { token: token.clone() }).await;
-                                                continue;
-                                            }
-
-                                            if to_app_tx.send(msg).await.is_err() {
-                                                // App closed
-                                                return;
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            // EOF
-                                            {
-                                                use std::io::Write;
-                                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
-                                                    writeln!(f, "DEBUG: IPC EOF").ok();
-                                                }
-                                            }
-                                            let _ = to_app_tx.send(Message::ClientDisconnected).await;
-                                            connected = false;
-                                        }
-                                        Err(e) => {
-                                            // Error
-                                            {
-                                                use std::io::Write;
-                                                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/piloteer_debug.log") {
-                                                    writeln!(f, "DEBUG: IPC Error: {}", e).ok();
-                                                }
-                                            }
-                                            let _ = to_app_tx.send(Message::ClientDisconnected).await;
-                                            connected = false;
-                                        }
-                                    }
-                                }
-                                // Send to Ansible
-                                outgoing = from_app_rx.recv() => {
-                                    match outgoing {
-                                        Some(msg) => {
-                                            if conn.send(&msg).await.is_err() {
-                                                // Send failed, disconnect
-                                                let _ = to_app_tx.send(Message::ClientDisconnected).await;
-                                                connected = false;
-                                            }
-                                        }
-                                        None => return, // App shutdown
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Accept error: {}", e);
-                        tokio::time::sleep(Duration::from_millis(1000)).await;
-                    }
-                }
-            }
-        });
-    }
-
-    // Give IPC server time to bind
-    if !app.replay_mode {
         tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if !ansible_args.is_empty() {
+            spawn_ansible(&ansible_args, verbose, &config);
+        }
+
+        let mut to_app_rx = to_app_rx;
+        let final_app = run_app(&mut terminal, app, &mut to_app_rx, headless, auto_analyze).await?;
+        cleanup(&mut terminal, headless, final_app, report_path).await
+    } else {
+        let (_, mut dummy_rx) = mpsc::channel::<Message>(1);
+        let final_app = run_app(&mut terminal, app, &mut dummy_rx, headless, auto_analyze).await?;
+        cleanup(&mut terminal, headless, final_app, report_path).await
     }
+}
 
-    // Spawn Ansible Playbook if provided (AND NOT REPLAY)
-    let mut _ansible_child = None;
-    if !app.replay_mode && !ansible_args.is_empty() {
-        use tokio::process::Command;
-
-        let mut cmd = Command::new("ansible-playbook");
-        if verbose > 0 {
-            let v_flag = format!("-{}", "v".repeat(verbose as usize));
-            cmd.arg(v_flag);
-        }
-        cmd.args(&ansible_args);
-        cmd.env("ANSIBLE_STRATEGY", "piloteer");
-
-        // Try to find plugin path relative to executable or CWD
-        // For development/POC, we assume CWD has ansible_plugin/strategies
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let plugin_path = cwd.join("ansible_plugin").join("strategies");
-        cmd.env("ANSIBLE_STRATEGY_PLUGINS", plugin_path);
-
-        // Env vars for plugin connection
-        // Standard Mode uses Unix socket by default unless bind_addr is set
-        if let Some(addr) = &config.bind_addr {
-            cmd.env("PILOTEER_SOCKET", addr);
-        } else {
-            cmd.env("PILOTEER_SOCKET", &config.socket_path);
-        }
-
-        if let Some(secret) = &config.secret_token {
-            cmd.env("PILOTEER_SECRET", secret);
-        }
-
-        // Redirect stdout/stderr to a log file for debugging
-        let log_file = std::fs::File::create("ansible_child.log")
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        let log_file_err = log_file.try_clone().unwrap();
-
-        cmd.stdout(log_file);
-        cmd.stderr(log_file_err);
-        cmd.stdin(std::process::Stdio::null());
-
-        match cmd.spawn() {
-            Ok(child) => {
-                _ansible_child = Some(child);
-            }
-            Err(e) => {
-                eprintln!("Failed to spawn ansible-playbook: {}", e);
-                // We might want to notify App or exit
-            }
-        }
+fn spawn_ansible(ansible_args: &[String], verbose: u8, config: &Config) {
+    use tokio::process::Command;
+    let mut cmd = Command::new("ansible-playbook");
+    if verbose > 0 {
+        cmd.arg(format!("-{}", "v".repeat(verbose as usize)));
     }
+    cmd.args(ansible_args);
+    cmd.env("ANSIBLE_STRATEGY", "piloteer");
+    let plugin_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("ansible_plugin")
+        .join("strategies");
+    cmd.env("ANSIBLE_STRATEGY_PLUGINS", plugin_path);
+    if let Some(addr) = &config.bind_addr {
+        cmd.env("PILOTEER_SOCKET", addr);
+    } else {
+        cmd.env("PILOTEER_SOCKET", &config.socket_path);
+    }
+    if let Some(secret) = &config.secret_token {
+        cmd.env("PILOTEER_SECRET", secret);
+    }
+    let log = std::fs::File::create("ansible_child.log")
+        .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+    let log_err = log.try_clone().unwrap();
+    cmd.stdout(log)
+        .stderr(log_err)
+        .stdin(std::process::Stdio::null());
+    if let Err(e) = cmd.spawn() {
+        eprintln!("Failed to spawn ansible-playbook: {}", e);
+    }
+}
 
-    // Main Loop
-    let res = run_app(&mut terminal, app, &mut to_app_rx, headless, auto_analyze).await;
-
-    // Restore Terminal if not headless
+async fn cleanup(
+    _terminal: &mut Option<DefaultTerminal>,
+    headless: bool,
+    app: App,
+    report_path: Option<String>,
+) -> Result<()> {
     if !headless {
         execute!(io::stdout(), crossterm::event::DisableMouseCapture)?;
         ratatui::restore();
     }
 
-    // Ensure child process is killed
-    if let Some(mut child) = _ansible_child {
-        let _ = child.kill().await;
-    }
-
-    let final_app = res?; // Check for errors before printing summary
-
-    // Auto-Archive Session (if not replay)
-    if !final_app.replay_mode
-        && let Ok(config_dir) = crate::config::Config::get_config_dir()
+    if !app.replay_mode
+        && let Ok(config_dir) = Config::get_config_dir()
     {
         let archive_dir = config_dir.join("archive");
-        if !archive_dir.exists() {
-            std::fs::create_dir_all(&archive_dir).ok();
-        }
+        std::fs::create_dir_all(&archive_dir).ok();
         let filename = format!(
             "session_{}.json.gz",
             chrono::Utc::now().format("%Y%m%d_%H%M%S")
         );
         let path = archive_dir.join(&filename);
-        let session_path = path.to_string_lossy();
-
-        let session = ansible_piloteer::session::Session::from_app(&final_app);
-        match session.save(&path.to_string_lossy()) {
-            Ok(_) => println!("Session archived to: {}", session_path),
+        match ansible_piloteer::session::Session::from_app(&app).save(&path.to_string_lossy()) {
+            Ok(_) => println!("Session archived to: {}", path.display()),
             Err(e) => eprintln!("Failed to archive session: {}", e),
         }
     }
 
-    // Drift Summary
-    println!("\n--- Drift Summary ---");
-    let changed_tasks: Vec<&TaskHistory> = final_app.history.iter().filter(|t| t.changed).collect();
-    if changed_tasks.is_empty() {
-        println!("No changes detected.");
-    } else {
-        println!("The following tasks modified the system state:");
-        for task in changed_tasks {
-            println!(" - {} [Task: {}]", task.host, task.name);
-        }
-        println!(
-            "Total Drift: {} tasks changed.",
-            final_app.history.iter().filter(|t| t.changed).count()
-        );
-    }
+    print_drift_summary(&app.history);
 
-    // Generate Report
     if let Some(path) = report_path {
-        use std::fs::File;
-        use std::io::Write;
-
-        println!("Generating report at {}...", path);
-        if path.ends_with(".json") {
-            match File::create(&path) {
-                Ok(mut file) => {
-                    let json = serde_json::to_string_pretty(&final_app.history).unwrap_or_default();
-                    if let Err(e) = file.write_all(json.as_bytes()) {
-                        eprintln!("Failed to write JSON report: {}", e);
-                    }
-                }
-                Err(e) => eprintln!("Failed to create report file: {}", e),
-            }
-        } else if path.ends_with(".md") {
-            let report = ansible_piloteer::report::ReportGenerator::new(&final_app);
-            if let Err(e) = report.save_to_file(path.as_str()) {
-                eprintln!("Failed to write Markdown report: {}", e);
-            }
-        } else {
-            eprintln!("Unsupported report format. Use .json or .md");
-        }
+        generate_report(&app, &path);
     }
 
     Ok(())
 }
+
+fn print_drift_summary(history: &[TaskHistory]) {
+    println!("\n--- Drift Summary ---");
+    let changed: Vec<_> = history.iter().filter(|t| t.changed).collect();
+    if changed.is_empty() {
+        println!("No changes detected.");
+    } else {
+        println!("The following tasks modified the system state:");
+        for t in &changed {
+            println!(" - {} [Task: {}]", t.host, t.name);
+        }
+        println!("Total Drift: {} tasks changed.", changed.len());
+    }
+}
+
+fn generate_report(app: &App, path: &str) {
+    use std::io::Write;
+    println!("Generating report at {}...", path);
+    if path.ends_with(".json") {
+        match std::fs::File::create(path) {
+            Ok(mut f) => {
+                let json = serde_json::to_string_pretty(&app.history).unwrap_or_default();
+                if let Err(e) = f.write_all(json.as_bytes()) {
+                    eprintln!("Failed to write JSON report: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Failed to create report file: {}", e),
+        }
+    } else if path.ends_with(".md") {
+        if let Err(e) = ansible_piloteer::report::ReportGenerator::new(app).save_to_file(path) {
+            eprintln!("Failed to write Markdown report: {}", e);
+        }
+    } else {
+        eprintln!("Unsupported report format. Use .json or .md");
+    }
+}
+
+// ── Event loop ───────────────────────────────────────────────────────────────
 
 async fn run_app(
     terminal: &mut Option<DefaultTerminal>,
@@ -796,914 +528,77 @@ async fn run_app(
     headless: bool,
     auto_analyze: bool,
 ) -> Result<App> {
-    // Spawn input thread
     let (input_tx, mut input_rx) = mpsc::channel(100);
     std::thread::spawn(move || {
         loop {
-            // Poll for 250ms
             if event::poll(Duration::from_millis(250)).unwrap_or(false)
                 && let Ok(evt) = event::read()
                 && input_tx.blocking_send(evt).is_err()
             {
                 break;
             }
-            // If main thread drops receiver, blocking_send fails and we break.
         }
     });
 
-    // AI Chat Channel
     let (ai_tx, mut ai_rx) = mpsc::channel::<anyhow::Result<ansible_piloteer::ai::ChatMessage>>(10);
 
     loop {
-        if !headless {
-            if let Some(t) = terminal {
-                t.draw(|f| ui::draw(f, &mut app))?;
-            }
-        } else {
-            // Headless logic here if needed
+        if !headless && let Some(t) = terminal {
+            t.draw(|f| ui::draw(f, &mut app))?;
         }
-
         if !app.running {
             break;
         }
 
-        // Track if IPC is complete (channel closed)
-        let ipc_complete = app.ipc_tx.is_none();
-
-        // Tick rate for UI refresh
-        let tick = tokio::time::sleep(Duration::from_millis(250));
-
-        // Update Event Velocity
         app.update_velocity();
+        let ipc_done = app.ipc_tx.is_none();
 
-        // This select acts as our event loop
         tokio::select! {
-             // Handle AI Chat Response
-             Some(res) = ai_rx.recv() => {
-                 app.chat_loading = false;
-                 match res {
-                     Ok(msg) => {
-                         app.chat_history.push(msg);
-                         // Check scroll. If at bottom, auto scroll?
-                         // For now just scroll to latest
-                         app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                     }
-                     Err(e) => {
-                         app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                             role: "system".to_string(),
-                             content: format!("Error: {}", e),
-                             collapsed: false,
-                         });
-                         app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                     }
-                 }
-             }
+            Some(res) = ai_rx.recv() => handle_ai_response(&mut app, res),
 
-            // Handle IPC messages (only if not complete)
-            msg_opt = ipc_rx.recv(), if !ipc_complete => {
-                match msg_opt {
-                    Some(msg) => {
-                        match msg {
-                            Message::Handshake { token: _ } => {
-                                app.client_connected = true;
-                                app.log("Connected".to_string(), Some(ratatui::style::Color::Cyan));
-                                if headless { println!("Headless: Ansible Connected"); }
-
-                                // Create root playbook span
-                                let playbook_span = ansible_piloteer::telemetry::create_root_span(
-                                    "playbook.execution",
-                                    vec![
-                                        opentelemetry::KeyValue::new("service.name", "ansible-piloteer"),
-                                        opentelemetry::KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                                    ],
-                                );
-
-                                // Attach span to context and store guard
-                                let guard = ansible_piloteer::telemetry::attach_span(playbook_span);
-                                app.playbook_span_guard = Some(guard);
-
-                                if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
-                            }
-                            Message::PlayStart { name, host_pattern } => {
-                                app.log(format!("Play Started: {} (Hosts: {})", name, host_pattern), Some(ratatui::style::Color::Cyan));
-
-                                // End previous play span if any
-                                app.play_span_guard = None;
-                                app.play_span = None;
-
-                                // Create Play Span
-                                let play_span = ansible_piloteer::telemetry::create_child_span(
-                                    format!("play: {}", name),
-                                    vec![
-                                        opentelemetry::KeyValue::new("play.name", name.clone()),
-                                        opentelemetry::KeyValue::new("play.hosts", host_pattern.clone()),
-                                    ],
-                                );
-
-                                // Attach span
-                                let guard = ansible_piloteer::telemetry::attach_span(play_span);
-                                app.play_span_guard = Some(guard);
-
-                                if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
-                            }
-                            Message::TaskStart { name, task_vars, facts } => {
-                                app.log(format!("Task: {}", name), Some(ratatui::style::Color::White));
-                                app.task_start_time = Some(Instant::now()); // [NEW] Phase 22
-                                app.set_task(name.clone(), task_vars.clone(), facts.clone());
-
-                                // Create task span as child of current context (should be play span)
-                                let task_span = ansible_piloteer::telemetry::create_child_span(
-                                    format!("task: {}", name),
-                                    vec![
-                                        opentelemetry::KeyValue::new("task.name", name.clone()),
-                                    ],
-                                );
-
-                                // Store span for later updates
-                                app.task_spans.insert(name.clone(), task_span);
-
-                                if let Some(idx) =
-                                    app.test_script.iter().position(|a| a.task_name == *name && !a.on_failure)
-                                {
-                                    println!("Headless: Executing Script Action for TaskStart: {}", name);
-                                    let script_action = app.test_script.remove(idx);
-                                    for action in script_action.actions {
-                                        match action {
-                                            ansible_piloteer::app::ScriptActionType::Pause => {
-                                                println!("Headless: Pausing (Scripted)...");
-                                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                            }
-                                            ansible_piloteer::app::ScriptActionType::Continue => {
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::Continue).await;
-                                                }
-                                            }
-                                            ansible_piloteer::app::ScriptActionType::Retry => {
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::Retry).await;
-                                                }
-                                            }
-                                            ansible_piloteer::app::ScriptActionType::EditVar { key, value } => {
-                                                println!("Headless: ModifyVar {} = {}", key, value);
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::ModifyVar {
-                                                        key,
-                                                        value,
-                                                    })
-                                                    .await;
-                                                }
-                                            }
-                                            ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
-                                                println!("Headless: Executing Command: {}", cmd);
-                                                let output = std::process::Command::new("sh")
-                                                    .arg("-c")
-                                                    .arg(cmd)
-                                                    .output();
-                                                match output {
-                                                    Ok(o) => println!(" Command Finished: status={}", o.status),
-                                                    Err(e) => println!(" Command Failed: {}", e),
-                                                }
-                                            }
-                                            ansible_piloteer::app::ScriptActionType::Resume => {
-                                                println!("Headless: Resuming (Scripted)...");
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::Proceed).await;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        // Small delay between actions
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
-                                    }
-                                    // If script actions were executed, we assume they handled control flow.
-                                    // But typically TaskStart just needs Proceed if not scripted to stop.
-                                    // If script didn't send Proceed, we might be stuck?
-                                    // Let's assume script includes "Continue" (which maps to Proceed in TaskStart context?)
-                                    // Message::Proceed is separate.
-                                    // Maybe we add Proceed to ScriptActionType?
-                                    // Or map Continue to Proceed if TaskStart?
-                                    // For now, if no script found, we auto-proceed. If script found, we do exactly what it says.
-                                } else if headless {
-                                    println!("Headless: Task Captured: {}", name);
-                                    // Auto-proceed for testing
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                    app.waiting_for_proceed = false;
-                                    if let Some(tx) = &app.ipc_tx {
-                                        let _ = tx.send(Message::Proceed).await;
-                                        println!("Headless: Auto-Proceeding...");
-                                    }
-                                } else if app.breakpoints.contains(&name) {
-                                    app.waiting_for_proceed = true;
-                                    app.log(format!("Breakpoint Hit: {}", name), Some(ratatui::style::Color::Magenta));
-                                    app.notification = Some((format!("Breakpoint Hit: {}", name), std::time::Instant::now()));
-                                } else {
-                                    app.waiting_for_proceed = false;
-                                    if let Some(tx) = &app.ipc_tx {
-                                        let _ = tx.send(Message::Proceed).await;
-                                    }
-                                }
-                            }
-                            Message::TaskFail { name, result: _, facts } => {
-                                app.log(format!("Task Failed: {}", name), Some(ratatui::style::Color::Red));
-
-                                // Update task span with failure information
-                                if let Some(span) = app.task_spans.get_mut(&name) {
-                                    ansible_piloteer::telemetry::record_error_on_span(span, &format!("Task '{}' failed", name));
-                                    ansible_piloteer::telemetry::add_span_attributes(span, vec![
-                                        opentelemetry::KeyValue::new("task.failed", true),
-                                    ]);
-                                }
-
-                                if headless {
-                                    println!("Headless: Task Failed: {}", name);
-                                    if let Some(client) = &app.ai_client {
-                                        let vars = app.task_vars.clone().unwrap_or(serde_json::json!({}));
-                                        let facts = app.facts.clone();
-
-                                        // Auto-Analyze Logic (only if NOT scripted)
-                                        if let Some(idx) =
-                                            app.test_script.iter().position(|a| a.task_name == *name && a.on_failure)
-                                        {
-                                            println!("Headless: Executing Script Action for TaskFail: {}", name);
-                                            let script_action = app.test_script.remove(idx);
-                                            for action in script_action.actions {
-                                                match action {
-                                                    ansible_piloteer::app::ScriptActionType::Retry => {
-                                                        println!("Headless: Retrying via Script...");
-                                                        if let Some(tx) = &app.ipc_tx {
-                                                            let _ = tx.send(Message::Retry).await;
-                                                        }
-                                                    }
-                                                    ansible_piloteer::app::ScriptActionType::Continue => {
-                                                        println!("Headless: Continuing via Script...");
-                                                        if let Some(tx) = &app.ipc_tx {
-                                                            let _ = tx.send(Message::Continue).await;
-                                                        }
-                                                    }
-                                                    ansible_piloteer::app::ScriptActionType::EditVar { key, value } => {
-                                                        println!("Headless: ModifyVar {} = {}", key, value);
-                                                        if let Some(tx) = &app.ipc_tx {
-                                                            let _ = tx.send(Message::ModifyVar {
-                                                                key,
-                                                                value,
-                                                            })
-                                                            .await;
-                                                        }
-                                                    }
-                                                     ansible_piloteer::app::ScriptActionType::Pause => {
-                                                        println!("Headless: Pausing on Failure (Scripted)...");
-                                                        tokio::time::sleep(Duration::from_secs(5)).await;
-                                                    }
-                                                    ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
-                                                        println!("Headless: Executing Command (on failure): {}", cmd);
-                                                        let output = std::process::Command::new("sh")
-                                                            .arg("-c")
-                                                            .arg(cmd)
-                                                            .output();
-                                                        match output {
-                                                            Ok(o) => println!(" Command Finished: status={}", o.status),
-                                                            Err(e) => println!(" Command Failed: {}", e),
-                                                        }
-                                                    }
-                                                    ansible_piloteer::app::ScriptActionType::AskAi => {
-                                                        println!("Headless: Asking AI (Scripted)...");
-                                                        // Always use real client now, configured via base_url for tests
-                                                        match client.analyze_failure(&name, "Task Failed", &vars, facts.as_ref()).await {
-                                                            Ok(analysis) => {
-                                                                 println!("Headless: AI Analysis Received: {:.50}...", analysis.analysis);
-                                                                 app.suggestion = Some(analysis.clone());
-                                                            }
-                                                            Err(e) => println!("Headless: AI Request Failed: {}", e),
-                                                        }
-                                                    }
-                                                    ansible_piloteer::app::ScriptActionType::AssertAiContext { contains } => {
-                                                        println!("Headless: Asserting AI Context...");
-                                                        if let Some(suggestion) = &app.suggestion {
-                                                            if let Some(text) = contains {
-                                                                if suggestion.analysis.contains(&text) {
-                                                                    println!("Headless: Assertion PASSED: Analysis contains '{}'", text);
-                                                                } else {
-                                                                    println!("Headless: Assertion FAILED: Analysis does NOT contain '{}'", text);
-                                                                    // Optional: Panic or exit?
-                                                                    // std::process::exit(1);
-                                                                }
-                                                            } else {
-                                                                println!("Headless: Assertion PASSED: AI Context present.");
-                                                            }
-                                                        } else {
-                                                            println!("Headless: Assertion FAILED: No AI Context found.");
-                                                            // std::process::exit(1);
-                                                        }
-                                                    }
-                                                    _ => {}
-                                                }
-                                                tokio::time::sleep(Duration::from_millis(200)).await;
-                                            }
-                                        } else if auto_analyze {
-                                            println!("Headless: Analyzing Failure...");
-                                            if let Ok(analysis) = client.analyze_failure(&name, "Task Failed", &vars, facts.as_ref()).await {
-                                                println!("\n🤖 AI ANALYSIS:\n{}\n", analysis.analysis);
-                                                if let Some(fix) = &analysis.fix {
-                                                    println!("💡 SUGGESTED FIX: {} = {}\n", fix.key, fix.value);
-                                                }
-                                                // Persist analysis by sending message to self
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::AiAnalysis {
-                                                        task: name.clone(),
-                                                        analysis: analysis.clone()
-                                                    }).await;
-                                                }
-                                            }
-                                        } else {
-                                            // Old test logic: just print generic info
-                                             if let Ok(analysis) = client.analyze_failure(&name, "Task Failed", &vars, facts.as_ref()).await {
-                                                println!("Headless: AI Analysis Tokens: {}", analysis.tokens_used);
-                                            }
-                                        }
-                                    }
-                                    if let Some(tx) = &app.ipc_tx {
-                                        let _ = tx.send(Message::ModifyVar { key: "should_fail".to_string(), value: serde_json::json!(false) }).await;
-                                        tokio::time::sleep(Duration::from_millis(500)).await;
-                                        let _ = tx.send(Message::Retry).await;
-                                    }
-                                } else {
-                                    app.set_failed(name, serde_json::Value::Null, facts.clone());
-                                }
-                            }
-                            Message::TaskResult { name, host, changed, failed, verbose_result } => {
-                               let (status, color) = if failed { ("FAILED", ratatui::style::Color::Red) }
-                                                     else if changed { ("CHANGED", ratatui::style::Color::Yellow) }
-                                                     else { ("OK", ratatui::style::Color::Green) };
-                                app.log(format!("Task '{}' on {}: {}", name, host, status), Some(color));
-
-                                // End task span with final attributes
-                                if let Some(span) = app.task_spans.remove(&name) {
-                                    ansible_piloteer::telemetry::end_span(span, vec![
-                                        opentelemetry::KeyValue::new("task.host", host.clone()),
-                                        opentelemetry::KeyValue::new("task.changed", changed),
-                                        opentelemetry::KeyValue::new("task.failed", failed),
-                                        opentelemetry::KeyValue::new("task.status", status),
-                                    ]);
-                                }
-
-                                let duration = app.task_start_time.map(|start| start.elapsed().as_secs_f64()).unwrap_or(0.0); // [NEW] Phase 22
-                                app.record_task_result(
-                                    name.clone(),
-                                    host,
-                                    changed,
-                                    failed,
-                                    duration, // [NEW]
-                                    None,
-                                    verbose_result.clone(),
-                                    None, // [NEW] analysis
-                                );
-                                if headless { println!("Headless: Task Result: {}", status); }
-
-                                // DEBUG: Dump verbose result
-                                if let Some(v) = &verbose_result {
-                                    use std::io::Write;
-                                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/piloteer_verbose.json") {
-                                        writeln!(f, "Task: {}\n{}", name, serde_json::to_string_pretty(v).unwrap_or_default()).ok();
-                                    }
-                                }
-                            }
-                            Message::TaskUnreachable { name, host, error, result } => {
-                                app.set_unreachable(name.clone(), host.clone(), error.clone(), result);
-
-                                if headless {
-                                    println!("Headless: Host {} unreachable: {}", host, error);
-
-                                    // Check for script actions to recover from Unreachable state
-                                    if let Some(idx) =
-                                        app.test_script.iter().position(|a| a.task_name == *name && a.on_failure)
-                                    {
-                                        println!("Headless: Executing Script Action for TaskUnreachable: {}", name);
-                                        let script_action = app.test_script.remove(idx);
-                                        for action in script_action.actions {
-                                            match action {
-                                                ansible_piloteer::app::ScriptActionType::Retry => {
-                                                    println!("Headless: Retrying via Script...");
-                                                    if let Some(tx) = &app.ipc_tx {
-                                                        let _ = tx.send(Message::Retry).await;
-                                                    }
-                                                }
-                                                ansible_piloteer::app::ScriptActionType::ExecuteCommand { cmd } => {
-                                                    println!("Headless: Executing Command (on unreachable): {}", cmd);
-                                                    let output = std::process::Command::new("sh")
-                                                        .arg("-c")
-                                                        .arg(cmd)
-                                                        .output();
-                                                    match output {
-                                                        Ok(o) => println!(" Command Finished: status={}", o.status),
-                                                        Err(e) => println!(" Command Failed: {}", e),
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                            tokio::time::sleep(Duration::from_millis(200)).await;
-                                        }
-                                    }
-                                }
-                            }
-                            Message::PlayRecap { stats } => {
-                                app.log(format!("Play Recap Received: {:?}", stats), Some(ratatui::style::Color::Cyan));
-
-                                // End Play Span
-                                app.play_span_guard = None;
-                                app.play_span = None;
-
-                                // Add to history so it can be inspected in Analysis Mode
-                                app.record_task_result(
-                                    "Play Recap".to_string(),
-                                    "all".to_string(),
-                                    false,
-                                    false,
-                                    0.0, // [NEW] Duration
-                                    None,
-                                    Some(ansible_piloteer::execution::ExecutionDetails::new(stats.clone())),
-                                    None, // [NEW] analysis
-
-                                );
-
-                                app.play_recap = Some(stats.clone());
-                                app.set_task("Playbook Complete".to_string(), serde_json::Value::Null, None);
-
-                                // Close playbook span by dropping the guard
-                                app.playbook_span_guard = None;
-                            }
-                            Message::AiAnalysis { task, analysis } => {
-                                app.asking_ai = false;
-                                app.suggestion = Some(analysis.clone());
-                                app.log(format!("AI Analysis Received for '{}'", task), Some(ratatui::style::Color::Cyan));
-
-                                // Update history if task matches
-                                if let Some(history_item) = app.history.iter_mut().rev().find(|t| t.name == task) {
-                                    history_item.analysis = Some(analysis);
-                                } else {
-                                     app.log(format!("Could not find task '{}' in history to attach analysis", task), Some(ratatui::style::Color::Red));
-                                }
-
-                                // Notification
-                                app.notification = Some(("AI Analysis Ready. Press 'v' to view.".to_string(), std::time::Instant::now()));
-                            }
-                            Message::ClientDisconnected => {
-                                app.client_connected = false;
-                                app.log("Client Disconnected".to_string(), Some(ratatui::style::Color::Red));
-                                if headless { println!("Headless: Client Disconnected"); }
-                            }
-                            Message::ModifyVar { .. } => {} // Handled elsewhere or just for IPC
-                            Message::Proceed | Message::Retry | Message::Continue => {}
-                        }
-                    }
-                    None => {
-                        if headless { app.running = false; }
-                        else {
-                            app.log("Playbook execution complete. Press 'q' to quit.".to_string(), Some(ratatui::style::Color::Cyan));
-                            app.ipc_tx = None;
-                        }
+            msg_opt = ipc_rx.recv(), if !ipc_done => match msg_opt {
+                Some(msg) => {
+                    ipc_handler::handle_message(&mut app, msg, headless, auto_analyze).await;
+                }
+                None => {
+                    if headless {
+                        app.running = false;
+                    } else {
+                        app.log(
+                            "Playbook execution complete. Press 'q' to quit.".to_string(),
+                            Some(ratatui::style::Color::Cyan),
+                        );
+                        app.ipc_tx = None;
                     }
                 }
-            }
+            },
 
-            // Handle TUI Input (Instant)
             Some(event) = input_rx.recv() => {
-                 if !headless {
-                    match app.handle_event(event) {
-                       Action::Quit => app.running = false,
-                       Action::SaveSession => {
-                            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                            let filename = format!("piloteer_session_{}.json.gz", timestamp);
-                            let session = ansible_piloteer::session::Session::from_app(&app);
-                            if let Err(e) = session.save(&filename) {
-                                 app.notification = Some((format!("Save Failed: {}", e), std::time::Instant::now()));
-                            } else {
-                                 app.notification = Some((format!("Saved to {}", filename), std::time::Instant::now()));
-                            }
-                       }
-                       Action::ExportReport => {
-                            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                            let filename = format!("piloteer_report_{}.md", timestamp);
-                            let report = ansible_piloteer::report::ReportGenerator::new(&app);
-                            if let Err(e) = report.save_to_file(&filename) {
-                                  app.notification = Some((format!("Report Failed: {}", e), std::time::Instant::now()));
-                            } else {
-                                  app.notification = Some((format!("Report Saved: {}", filename), std::time::Instant::now()));
-                            }
-                       }
-                       Action::Proceed => {
-                           if app.waiting_for_proceed {
-                               app.waiting_for_proceed = false;
-                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
-                           }
-                       }
-                       Action::Retry => {
-                           if app.waiting_for_proceed {
-                               app.waiting_for_proceed = false;
-                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Retry).await; }
-                           }
-                       }
-                       Action::Continue => {
-                           if app.waiting_for_proceed {
-                               app.waiting_for_proceed = false;
-                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Continue).await; }
-                           }
-                       }
-                       Action::EditVar => {
-                           // Phase 31: Launch External Editor
-                           if let ansible_piloteer::app::EditState::EditingValue { temp_file, .. } = &app.edit_state {
-                               // 1. Suspend TUI
-                               let _ = disable_raw_mode();
-                               let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                if !headless {
+                    let action = app.handle_event(event);
+                    actions::dispatch(action, &mut app, terminal, &ai_tx).await;
+                }
+            },
 
-                               // 2. Run Editor
-                               let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-                               let status = Command::new(&editor)
-                                   .arg(temp_file)
-                                   .status();
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+        }
+    }
 
-                               // 3. Resume TUI
-                               let _ = execute!(io::stdout(), EnterAlternateScreen);
-                               let _ = enable_raw_mode();
-                               if let Some(t) = terminal {
-                                   let _ = t.clear();
-                                   let _ = t.hide_cursor();
-                               }
-
-                               // 4. Handle Result
-                               if let Ok(status) = status {
-                                   if status.success() {
-                                       match app.apply_edit() {
-                                           Ok((key, value)) => {
-                                                // Send IPC
-                                                if let Some(tx) = &app.ipc_tx {
-                                                    let _ = tx.send(Message::ModifyVar { key: key.clone(), value: value.clone() }).await;
-                                                    app.notification = Some((format!("Updated Variable: {}", key), std::time::Instant::now()));
-                                                }
-                                           },
-                                           Err(e) => {
-                                               app.notification = Some((format!("Edit Failed: {}", e), std::time::Instant::now()));
-                                           }
-                                       }
-                                   } else {
-                                       app.notification = Some(("Editor exited with error".to_string(), std::time::Instant::now()));
-                                       app.cancel_edit();
-                                   }
-                               } else {
-                                    app.notification = Some(("Failed to launch editor".to_string(), std::time::Instant::now()));
-                                    app.cancel_edit();
-                               }
-                           }
-                       }
-                        Action::AskAi => {
-                           let client_opt = app.ai_client.clone();
-                           let current_task_opt = app.current_task.clone();
-                           let failed_task_opt = app.failed_task.clone();
-                           let vars = app.task_vars.clone().unwrap_or(serde_json::json!({}));
-                           let facts = app.facts.clone();
-
-                           if let Some(client) = client_opt {
-                               app.asking_ai = true;
-                               app.log("Asking AI Pilot...".to_string(), Some(ratatui::style::Color::Magenta));
-
-                               // Clone TX to send result back to main loop
-                               if let Some(tx) = &app.ipc_tx {
-                                   let tx = tx.clone();
-                                   tokio::spawn(async move {
-                                        let task_name = failed_task_opt.or(current_task_opt).unwrap_or("Unknown".to_string());
-                                        match client.analyze_failure(&task_name, "Task Failed", &vars, facts.as_ref()).await {
-                                            Ok(analysis) => {
-                                                // We need a new Message variant to send analysis back?
-                                                // Or we can just use a separate channel for internal app events?
-                                                // Current architecture uses ipc_rx for both IPC and some app events might need a way.
-                                                // Actually, ipc_rx receives Message enum. We should add Message::AiAnalysis.
-                                                let _ = tx.send(Message::AiAnalysis {
-                                                    task: task_name,
-                                                    analysis
-                                                }).await;
-                                            },
-                                            Err(_e) => {
-                                                 // Log error somehow?
-                                                 // For now ignore or maybe send error message
-                                            }
-                                        }
-                                   });
-                               }
-                           }
-                       }
-                        Action::SubmitChat => {
-                           let client_opt = app.ai_client.clone();
-                           if let Some(client) = client_opt {
-                               let input = app.chat_input.clone();
-                               if !input.trim().is_empty() {
-                                   app.chat_input.clear(); // Clear immediately
-
-                                   // [NEW] Command Aliases: dispatch IPC actions from chat
-                                   let lower = input.trim().to_lowercase();
-                                   match lower.as_str() {
-                                       "p" | "proceed" => {
-                                           if app.waiting_for_proceed {
-                                               app.waiting_for_proceed = false;
-                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Proceed).await; }
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "⏩ Proceeding...".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           } else {
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "Not waiting for proceed.".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           }
-                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                                       }
-                                       "c" | "continue" => {
-                                           if app.waiting_for_proceed {
-                                               app.waiting_for_proceed = false;
-                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Continue).await; }
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "▶️ Continuing (skip failed task)...".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           } else {
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "Not waiting for proceed.".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           }
-                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                                       }
-                                       "r" | "retry" => {
-                                           if app.waiting_for_proceed {
-                                               app.waiting_for_proceed = false;
-                                               if let Some(tx) = &app.ipc_tx { let _ = tx.send(Message::Retry).await; }
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "🔄 Retrying task...".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           } else {
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: "Not waiting for proceed.".to_string(),
-                                                   collapsed: false,
-                                               });
-                                           }
-                                           app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                                       }
-                                       _ if input.starts_with('/') => {
-                                   // [NEW] Slash Commands
-                                   let parts: Vec<&str> = input.split_whitespace().collect();
-                                   match parts.first() {
-                                       Some(&"/model") => {
-                                           if parts.len() == 1 {
-                                               // List models with numbered selection
-                                               let models = client.list_models().await;
-                                               let mut list_str = String::from("Available Models:\n");
-                                               for (i, m) in models.iter().enumerate() {
-                                                   let marker = if *m == client.get_model() { " ← current" } else { "" };
-                                                   list_str.push_str(&format!("  {}. {}{}\n", i + 1, m, marker));
-                                               }
-                                               list_str.push_str("\nUse /model <name> to switch.");
-                                               app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                   role: "system".to_string(),
-                                                   content: list_str,
-                                                   collapsed: false,
-                                               });
-                                           } else if let Some(model_name) = parts.get(1) {
-                                                // Set model
-                                                if let Some(app_client) = &mut app.ai_client {
-                                                    app_client.set_model(model_name);
-                                                    app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                                        role: "system".to_string(),
-                                                        content: format!("Switched to model: {}", model_name),
-                                                        collapsed: false,
-                                                    });
-                                                }
-                                           }
-                                       }
-                                       Some(&"/context") => {
-                                           // [NEW] Phase 31: Context Sharing
-                                           let context = ansible_piloteer::ai::AiClient::build_context_summary(
-                                               app.current_task.as_deref(),
-                                               app.task_vars.as_ref(),
-                                               app.failed_task.as_deref(),
-                                               app.failed_result.as_ref(),
-                                           );
-                                           app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                               role: "system".to_string(),
-                                               content: format!("📋 Current Context:\n\n{}", context),
-                                               collapsed: false,
-                                           });
-                                       }
-                                       Some(&"/help") => {
-                                           app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                               role: "system".to_string(),
-                                               content: "Chat Commands:\n\
-                                                   /model          — List available models\n\
-                                                   /model <name>   — Switch to a model\n\
-                                                   /context        — Show current task context\n\
-                                                   /help           — Show this help\n\
-                                                   \n\
-                                                   Quick Actions (type directly):\n\
-                                                   p / proceed     — Proceed to next task\n\
-                                                   c / continue    — Continue past failure\n\
-                                                   r / retry       — Retry failed task".to_string(),
-                                               collapsed: false,
-                                           });
-                                       }
-                                       _ => {
-                                            app.chat_history.push(ansible_piloteer::ai::ChatMessage {
-                                               role: "system".to_string(),
-                                               content: format!("Unknown command: {}. Type /help for available commands.", input),
-                                               collapsed: false,
-                                           });
-                                       }
-                                   }
-                                   // Scroll to bottom
-                                   app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-                                       }
-                                       _ => {
-                                       // Normal Chat Message
-                                       app.chat_loading = true;
-                                       // Add user message
-                                       let user_msg = ansible_piloteer::ai::ChatMessage {
-                                           role: "user".to_string(),
-                                           content: input,
-                                           collapsed: false,
-                                       };
-                                       app.chat_history.push(user_msg);
-                                       // Scroll to bottom
-                                       app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
-
-                                       let history = app.chat_history.clone();
-                                       let tx = ai_tx.clone();
-
-                                       tokio::spawn(async move {
-                                           let res = client.chat(history).await;
-                                           let _ = tx.send(res).await;
-                                       });
-                                       }
-                                   }
-                               }
-                           } else {
-                                app.notification = Some(("AI Client not configured. Cannot send message.".to_string(), std::time::Instant::now()));
-                                app.log("SubmitChat Failed: AI Client is None".to_string(), Some(ratatui::style::Color::Red));
-                           }
-                        }
-                       Action::ApplyFix => {
-                           if let Some(analysis) = &app.suggestion
-                               && let Some(fix) = &analysis.fix
-                                   && let Some(tx) = &app.ipc_tx {
-                                        let _ = tx.send(Message::ModifyVar { key: fix.key.clone(), value: fix.value.clone() }).await;
-                                        app.log(format!("Applying Fix: {} = {}", fix.key, fix.value), Some(ratatui::style::Color::Green));
-                                   }
-                       }
-                       Action::ToggleFollow => {
-                            app.auto_scroll = !app.auto_scroll;
-                            if app.auto_scroll { app.log_scroll = 0; }
-                       }
-                        Action::ToggleAnalysis => {
-                            if app.active_view == ActiveView::Analysis {
-                                app.active_view = ActiveView::Dashboard;
-                            } else {
-                                app.active_view = ActiveView::Analysis;
-                                app.scroll_offset = 0;
-                                if let Some(task) = app.history.get(app.analysis_index) {
-                                     let json_data = task.verbose_result.as_ref().map(|d| d.inner().clone()).unwrap_or_else(|| {
-                                         if let Some(err) = &task.error { serde_json::json!({ "error": err }) }
-                                         else { serde_json::json!({ "message": "No verbose data captured." }) }
-                                     });
-                                     app.analysis_tree = Some(JsonTreeState::new(json_data));
-                                } else { app.analysis_tree = None; }
-                            }
-                        }
-                       Action::AnalysisNext => {
-                            if !app.history.is_empty() {
-                                app.analysis_index = (app.analysis_index + 1).min(app.history.len() - 1);
-                                app.scroll_offset = 0;
-                                if let Some(task) = app.history.get(app.analysis_index) {
-                                     let json_data = task.verbose_result.as_ref().map(|d| d.inner().clone()).unwrap_or_else(|| {
-                                         if let Some(err) = &task.error { serde_json::json!({ "error": err }) }
-                                         else { serde_json::json!({ "message": "No verbose data captured." }) }
-                                     });
-                                     app.analysis_tree = Some(JsonTreeState::new(json_data));
-                                }
-                            }
-                       }
-                       Action::AnalysisPrev => {
-                           if !app.history.is_empty() {
-                                app.analysis_index = app.analysis_index.saturating_sub(1);
-                                app.scroll_offset = 0;
-                                if let Some(task) = app.history.get(app.analysis_index) {
-                                     let json_data = task.verbose_result.as_ref().map(|d| d.inner().clone()).unwrap_or_else(|| {
-                                         if let Some(err) = &task.error { serde_json::json!({ "error": err }) }
-                                         else { serde_json::json!({ "message": "No verbose data captured." }) }
-                                     });
-                                     app.analysis_tree = Some(JsonTreeState::new(json_data));
-                                }
-                           }
-                       }
-                        Action::ToggleMetrics => {
-                            if app.active_view == ActiveView::Metrics {
-                                app.active_view = ActiveView::Dashboard;
-                            } else {
-                                app.active_view = ActiveView::Metrics;
-                            }
-                        }
-                       Action::ToggleMetricsView => {
-                           // Toggle between Dashboard and Heatmap
-                           app.metrics_view = match app.metrics_view {
-                               ansible_piloteer::app::MetricsView::Dashboard => ansible_piloteer::app::MetricsView::Heatmap,
-                               ansible_piloteer::app::MetricsView::Heatmap => ansible_piloteer::app::MetricsView::Dashboard,
-                           };
-                       }
-                        Action::SubmitQuery(query_str) => {
-                            // Phase 26: Execute JMESPath Query
-                            app.notification = Some(("Executing Query...".to_string(), std::time::Instant::now()));
-
-                            // Reconstruct Session for Query Context
-                            let session = ansible_piloteer::session::Session::from_app(&app);
-                            match serde_json::to_value(&session) {
-                                Ok(json) => {
-                                    match ansible_piloteer::query::run_query(&query_str, &json) {
-                                        Ok(result) => {
-                                            app.active_view = ActiveView::Analysis;
-                                            app.analysis_tree = Some(JsonTreeState::new(result));
-                                            app.analysis_focus = app::AnalysisFocus::DataBrowser;
-                                            app.notification = Some((format!("Query Executed: {}", query_str), std::time::Instant::now()));
-                                        },
-                                        Err(e) => {
-                                            app.notification = Some((format!("Query Error: {}", e), std::time::Instant::now()));
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    app.notification = Some((format!("Session Serialization Error: {}", e), std::time::Instant::now()));
-                                }
-                            }
-                        }
-                       Action::None => {}
-                        Action::Yank => {
-                             if app.active_view == ActiveView::Analysis {
-                                 if app.analysis_focus == app::AnalysisFocus::DataBrowser
-                                    && let Some(tree) = &app.analysis_tree
-                                    && let Some(content) = tree.get_selected_content()
-                                {
-                                    app.copy_to_clipboard(content);
-                                }
-                            } else {
-                               // Standard Mode: Copy Inspector Content
-                               let content = if let Some(err) = &app.failed_result {
-                                   serde_json::to_string_pretty(err).unwrap_or_default()
-                               } else {
-                                   "No Active Failure".to_string()
-                               };
-                               app.copy_to_clipboard(content);
-                           }
-                        }
-                        Action::YankVisual => {
-                             // Phase 16: Visual mode yank
-                             if app.active_view == ActiveView::Analysis && app.visual_mode {
-                                 if let Some(tree) = &app.analysis_tree
-                                    && let Some(start) = app.visual_start_index
-                                {
-                                    let end = tree.selected_line;
-                                    if let Some(content) = tree.get_range_content(start, end) {
-                                        app.copy_to_clipboard(content);
-                                    }
-                                }
-                                // Exit visual mode after yank
-                                app.visual_mode = false;
-                                app.visual_start_index = None;
-                            }
-                        }
-                        Action::YankWithCount => {
-                             // Phase 16: Count-based yank (y3j)
-                             if app.active_view == ActiveView::Analysis {
-                                 if let Some(tree) = &app.analysis_tree
-                                    && let Some(count) = app.pending_count
-                                    && let Some(content) = tree.get_content_with_count(count)
-                                {
-                                    app.copy_to_clipboard(content);
-                                }
-                                app.pending_count = None;
-                            }
-                        }
-
-                        Action::ToggleBreakpoint => {
-                            app.toggle_breakpoint();
-                        }
-                        _ => {}
-                 }
-                     }
-            }, // End input_rx match
-
-            _ = tick => {}
-        } // End select!
-    } // End loop
     Ok(app)
+}
+
+fn handle_ai_response(app: &mut App, res: anyhow::Result<ansible_piloteer::ai::ChatMessage>) {
+    app.chat_loading = false;
+    let msg = match res {
+        Ok(m) => m,
+        Err(e) => ansible_piloteer::ai::ChatMessage {
+            role: "system".to_string(),
+            content: format!("Error: {}", e),
+            collapsed: false,
+        },
+    };
+    app.chat_history.push(msg);
+    if app.chat_auto_scroll {
+        app.chat_scroll = app.chat_history.len().saturating_sub(1) as u16;
+    }
 }
