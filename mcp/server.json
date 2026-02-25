@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+        "ansible-piloteer": {
+            "command": "ansible-piloteer",
+            "args": [
+                "mcp"
+            ],
+            "env": {
+                "ANSIBLE_STRATEGY": "piloteer"
+            }
+        }
+    }
+}

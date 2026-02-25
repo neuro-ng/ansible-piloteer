@@ -10,6 +10,7 @@ pub mod input;
 pub mod ipc;
 pub mod ipc_handler;
 pub mod mcp;
+pub mod plugin;
 pub mod query;
 pub mod quota;
 pub mod repl;

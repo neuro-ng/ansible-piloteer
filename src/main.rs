@@ -171,6 +171,12 @@ enum Commands {
     },
     /// Start MCP stdio server for IDE integration
     Mcp,
+    /// Install the Piloteer Ansible strategy plugin to ~/.ansible/plugins/strategy/
+    Init {
+        /// Force overwrite even if the plugin is already installed
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -215,8 +221,19 @@ async fn main() -> Result<()> {
             input,
             format,
         }) => handle_query(query, input, format, config),
-        Some(Commands::Mcp) => ansible_piloteer::mcp::run_stdio_server(),
+        Some(Commands::Mcp) => ansible_piloteer::mcp::run_stdio_server().await,
+        Some(Commands::Init { force }) => match ansible_piloteer::plugin::install_plugin(force) {
+            Ok(path) => {
+                println!("✓ Strategy plugin installed to: {}", path.display());
+                println!("\n  Ansible will auto-discover it. Just set:");
+                println!("    export ANSIBLE_STRATEGY=piloteer");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
         None => {
+            // Auto-install the strategy plugin on every TUI startup
+            ansible_piloteer::plugin::ensure_plugin();
             run_tui(
                 cli.ansible_args,
                 cli.report,
