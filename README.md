@@ -1,4 +1,6 @@
 # Ansible Piloteer
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fneuro-ng%2Fansible-piloteer.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fneuro-ng%2Fansible-piloteer?ref=badge_shield)
+
 
 **Ansible Piloteer** is an interactive, AI-powered debugger and execution wrapper for Ansible playbooks. It transforms Ansible's "black box" execution into a transparent, controllable process with a TUI (Text User Interface) for step-through debugging, live state inspection, and runtime failure recovery.
 
@@ -280,3 +282,7 @@ This script runs a test playbook (`fail_on_var.yml`) that conditionally fails, m
 ## 🔮 Roadmap
 -   **Advanced TUI**: Full variable editor and breakpoint management.
 -   **History**: Request/Response logs for AI interactions.
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fneuro-ng%2Fansible-piloteer.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fneuro-ng%2Fansible-piloteer?ref=badge_large)
